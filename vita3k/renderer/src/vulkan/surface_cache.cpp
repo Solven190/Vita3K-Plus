@@ -619,7 +619,31 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
             };
             casted->texture.width = width;
             casted->texture.height = height;
-            casted->texture.format = vk_format;
+
+            auto store_is_f16 = [](SceGxmColorBaseFormat f) {
+                return f == SCE_GXM_COLOR_BASE_FORMAT_F16
+                    || f == SCE_GXM_COLOR_BASE_FORMAT_F16F16
+                    || f == SCE_GXM_COLOR_BASE_FORMAT_F16F16F16F16;
+            };
+
+            auto force_unsigned_reinterpret_format = [](vk::Format fmt) {
+                switch (fmt) {
+                case vk::Format::eR8Snorm: return vk::Format::eR8Unorm;
+                case vk::Format::eR8G8Snorm: return vk::Format::eR8G8Unorm;
+                case vk::Format::eR8G8B8A8Snorm: return vk::Format::eR8G8B8A8Unorm;
+                case vk::Format::eR16Snorm: return vk::Format::eR16Unorm;
+                case vk::Format::eR16G16Snorm: return vk::Format::eR16G16Unorm;
+                case vk::Format::eR16G16B16A16Snorm: return vk::Format::eR16G16B16A16Unorm;
+                case vk::Format::eR8Sint: return vk::Format::eR8Uint;
+                case vk::Format::eR8G8Sint: return vk::Format::eR8G8Uint;
+                case vk::Format::eR8G8B8A8Sint: return vk::Format::eR8G8B8A8Uint;
+                default: return fmt;
+                }
+            };
+
+            casted->texture.format = (bytes_per_pixel_requested != bytes_per_pixel_in_store && store_is_f16(info.format))
+                ? force_unsigned_reinterpret_format(vk_format)
+                : vk_format;
 
             // find the swizzle we need to apply
             const std::uint8_t components_in_store = vk::componentCount(info.texture.format);
