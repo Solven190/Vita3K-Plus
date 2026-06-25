@@ -617,8 +617,13 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
                 .cropped_height = height,
                 .format = base_format
             };
-            casted->texture.width = width;
-            casted->texture.height = height;
+            if (bytes_per_pixel_requested == bytes_per_pixel_in_store) {
+                casted->texture.width = original_width;
+                casted->texture.height = original_height;
+            } else {
+                casted->texture.width = width;
+                casted->texture.height = height;
+            }
 
             auto store_is_f16 = [](SceGxmColorBaseFormat f) {
                 return f == SCE_GXM_COLOR_BASE_FORMAT_F16
@@ -672,20 +677,20 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
         casted->scene_timestamp = scene_timestamp;
 
         if (bytes_per_pixel_requested == bytes_per_pixel_in_store) {
-            vk::ImageCopy image_copy{
+            const int32_t src_w = static_cast<int32_t>(std::min<uint32_t>(width, info.width - start_x));
+            const int32_t src_h = static_cast<int32_t>(std::min<uint32_t>(height, info.height - start_sourced_line));
+            const int32_t dst_w = static_cast<int32_t>(original_width);
+            const int32_t dst_h = static_cast<int32_t>(original_height);
+
+            vk::ImageBlit blit{
                 .srcSubresource = vkutil::color_subresource_layer,
-                .srcOffset = { static_cast<int32_t>(start_x), static_cast<int32_t>(start_sourced_line), 0 },
+                .srcOffsets = std::array<vk::Offset3D, 2>{
+                vk::Offset3D{ static_cast<int32_t>(start_x), static_cast<int32_t>(start_sourced_line), 0 },
+                vk::Offset3D{ static_cast<int32_t>(start_x) + src_w, static_cast<int32_t>(start_sourced_line) + src_h, 1 } },
                 .dstSubresource = vkutil::color_subresource_layer,
-                .dstOffset = { 0,
-                    0,
-                    0 },
-                .extent = {
-                    // Don't try to copy what is in the stride
-                    std::min<uint32_t>(width, info.width),
-                    std::min<uint32_t>(height, info.height),
-                    1 }
+                .dstOffsets = std::array<vk::Offset3D, 2>{ vk::Offset3D{ 0, 0, 0 }, vk::Offset3D{ dst_w, dst_h, 1 } }
             };
-            cmd_buffer.copyImage(info.texture.image, vk::ImageLayout::eGeneral, casted->texture.image, vk::ImageLayout::eTransferDstOptimal, image_copy);
+            cmd_buffer.blitImage(info.texture.image, vk::ImageLayout::eGeneral, casted->texture.image, vk::ImageLayout::eTransferDstOptimal, blit, vk::Filter::eLinear);
         } else {
             LOG_INFO_ONCE("Game is doing typeless copies");
 
@@ -806,7 +811,7 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
                 cmd_buffer.copyBufferToImage(casted->transition_buffer.buffer, casted->texture.image, vk::ImageLayout::eTransferDstOptimal, copy_image_buffer);
             }
         }
-        casted->texture.transition_to(cmd_buffer, vkutil::ImageLayout::ColorAttachmentReadWrite);
+        casted->texture.transition_to(cmd_buffer, vkutil::ImageLayout::SampledImage);
 
         return TextureLookupResult{
             casted->texture.view,
