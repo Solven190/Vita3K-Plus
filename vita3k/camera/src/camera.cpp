@@ -321,8 +321,8 @@ int Camera::read(SceCameraRead *read, void *pIBase, void *pUBase, void *pVBase, 
     read->status = SCE_CAMERA_STATUS_IS_ACTIVE;
     read->timestamp = last_frame_timestamp_us;
     if (pImpl->frame) {
+        sizeIBase = std::min(sizeIBase, (SceSize)(pImpl->frame->pitch * pImpl->frame->h)); // here pitch is width in bytes
         if (this->info.format == SCE_CAMERA_FORMAT_YUV420_PLANE) {
-            sizeIBase = std::min(sizeIBase, (SceSize)(pImpl->frame->pitch * pImpl->frame->h));
             sizeUBase = std::min(sizeUBase, (SceSize)(pImpl->frame->pitch * pImpl->frame->h / 4));
             sizeVBase = std::min(sizeVBase, (SceSize)(pImpl->frame->pitch * pImpl->frame->h / 4));
             memcpy(pIBase, (uint8_t *)pImpl->frame->pixels, sizeIBase);
@@ -333,8 +333,13 @@ int Camera::read(SceCameraRead *read, void *pIBase, void *pUBase, void *pVBase, 
             const int width = pImpl->frame->w;
             const int height = pImpl->frame->h;
             if (sizeIBase < (SceSize)(width * height) || sizeUBase < (SceSize)((width / 2) * height) || sizeVBase < (SceSize)((width / 2) * height)) {
-                LOG_ERROR_ONCE("Buffer sizes too small for YUV422 planar conversion: IBase {}, UBase {}, VBase {}, required I {}, U {}, V {}", sizeIBase, sizeUBase, sizeVBase, width * height, (width / 2) * height, (width / 2) * height);
-                return SCE_CAMERA_ERROR_PARAM;
+                LOG_ERROR_ONCE("Buffer sizes too small for YUV422 planar conversion: IBase {}, UBase {}, VBase {}, required I {}, U {}, V {}.", sizeIBase, sizeUBase, sizeVBase, width * height, (width / 2) * height, (width / 2) * height);
+                if (sizeIBase >= (SceSize)(width * height)) {
+                    memcpy(pIBase, pImpl->frame->pixels, sizeIBase); // Copy Y plane only if buffer is large enough
+                }
+                else {
+                    return SCE_CAMERA_ERROR_PARAM;
+                }
             }
             if (!SDL_LockSurface(pImpl->frame.get())) {
                 LOG_ERROR("Failed to lock camera frame surface: {}", SDL_GetError());
@@ -357,7 +362,6 @@ int Camera::read(SceCameraRead *read, void *pIBase, void *pUBase, void *pVBase, 
             }
             SDL_UnlockSurface(pImpl->frame.get());
         } else {
-            sizeIBase = std::min(sizeIBase, (SceSize)(pImpl->frame->pitch * pImpl->frame->h)); // here pitch is width in bytes
             memcpy(pIBase, pImpl->frame->pixels, sizeIBase);
         }
     } else {
