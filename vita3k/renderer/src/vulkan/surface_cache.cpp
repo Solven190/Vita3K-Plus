@@ -59,6 +59,32 @@ static bool format_need_additional_memory(SceGxmColorBaseFormat format) {
 
 namespace renderer::vulkan {
 
+static bool surface_sync_needs_u4u4u4u4_repack(const ColorSurfaceCacheInfo &surface) {
+    return surface.format == SCE_GXM_COLOR_BASE_FORMAT_U4U4U4U4
+        && (surface.texture.format == vk::Format::eR8G8B8A8Unorm
+            || surface.texture.format == vk::Format::eR8G8B8A8Srgb);
+}
+
+static uint8_t unorm8_to_unorm4(uint8_t value) {
+    return static_cast<uint8_t>((static_cast<uint32_t>(value) * 15 + 127) / 255);
+}
+
+static void pack_rgba8_to_r4g4b4a4(uint8_t *dst, const uint8_t *src, uint32_t pixel_stride, uint32_t height) {
+    for (uint32_t y = 0; y < height; y++) {
+        uint16_t *dst_row = reinterpret_cast<uint16_t *>(dst + y * pixel_stride * sizeof(uint16_t));
+        const uint8_t *src_row = src + y * pixel_stride * 4;
+
+        for (uint32_t x = 0; x < pixel_stride; x++) {
+            const uint8_t r = unorm8_to_unorm4(src_row[x * 4 + 0]);
+            const uint8_t g = unorm8_to_unorm4(src_row[x * 4 + 1]);
+            const uint8_t b = unorm8_to_unorm4(src_row[x * 4 + 2]);
+            const uint8_t a = unorm8_to_unorm4(src_row[x * 4 + 3]);
+
+            dst_row[x] = static_cast<uint16_t>(r | (g << 4) | (b << 8) | (a << 12));
+        }
+    }
+}
+
 static void protect_surface(MemState &mem, ColorSurfaceCacheInfo &info) {
     const bool trap_reads = (info.tiling == SurfaceTiling::Linear
         && format_support_surface_sync(info.format));
@@ -250,7 +276,7 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_color_surface_for_framebuffer(Mem
     overlap = (overlap && (ite->first + ite->second->total_bytes) > address);
 
     const SceGxmColorBaseFormat base_format = gxm::get_base_format(color->colorFormat);
-    vk::Format vk_format = color::translate_format(base_format);
+    vk::Format vk_format = color::translate_surface_format(base_format);
 
     SurfaceTiling tiling;
     if (color->surfaceType == SCE_GXM_COLOR_SURFACE_LINEAR)
@@ -444,7 +470,7 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
         return std::nullopt;
 
     const vk::ComponentMapping swizzle = texture::translate_swizzle(gxm::get_format(texture));
-    vk::Format vk_format = color::translate_format(base_format);
+    vk::Format vk_format = color::translate_surface_format(base_format);
 
     const bool is_srgb = texture.gamma_mode != 0;
     if (is_srgb) {
@@ -1416,14 +1442,17 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
 
     vk::Buffer buffer;
     uint32_t offset;
-    if (format_need_additional_memory(last_written_surface->format)) {
+    const uint32_t pixel_stride = (last_written_surface->stride_bytes * 8) / gxm::bits_per_pixel(last_written_surface->format);
+    const bool needs_copy_buffer = format_need_additional_memory(last_written_surface->format) || surface_sync_needs_u4u4u4u4_repack(*last_written_surface);
+    
+    if (needs_copy_buffer) {
         if (!last_written_surface->copy_buffer)
             last_written_surface->copy_buffer = std::make_unique<vkutil::Buffer>();
 
         vkutil::Buffer &copy_buffer = *last_written_surface->copy_buffer;
 
         if (!copy_buffer.buffer) {
-            copy_buffer.size = last_written_surface->stride_bytes * last_written_surface->original_height;
+            copy_buffer.size = static_cast<vk::DeviceSize>(pixel_stride) * last_written_surface->original_height * vk::blockSize(last_written_surface->texture.format);
             copy_buffer.init_buffer(vk::BufferUsageFlagBits::eTransferDst, vkutil::vma_mapped_alloc);
         }
 
@@ -1437,7 +1466,6 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
         last_written_surface->need_post_surface_sync = !is_swizzle_identity;
         std::tie(buffer, offset) = state.get_matching_mapping(last_written_surface->data);
     }
-    const uint32_t pixel_stride = (last_written_surface->stride_bytes * 8) / gxm::bits_per_pixel(last_written_surface->format);
     vk::BufferImageCopy copy{
         .bufferOffset = offset,
         .bufferRowLength = pixel_stride,
@@ -1517,6 +1545,11 @@ void VKSurfaceCache::perform_post_surface_sync(const MemState &mem, ColorSurface
     const uint32_t pixel_stride = (surface->stride_bytes * 8) / gxm::bits_per_pixel(surface->format);
     const uint32_t nb_pixels = pixel_stride * surface->original_height;
     uint8_t *pixels = surface->data.cast<uint8_t>().get(mem);
+
+    if (surface_sync_needs_u4u4u4u4_repack(*surface)) {
+        pack_rgba8_to_r4g4b4a4(pixels, static_cast<const uint8_t *>(surface->copy_buffer->mapped_data), pixel_stride, surface->original_height);
+        return;
+    }
 
     if (format_need_additional_memory(surface->format)) {
         // special case, use a custom function
