@@ -487,6 +487,11 @@ void free(MemState &state, Address address) {
     const uint32_t page_num = address / STANDARD_PAGE_SIZE;
     assert(page_num >= 0);
 
+    if (state.alloc_table == nullptr) {
+        LOG_CRITICAL("Freeing unallocated alloc_table");
+        return;
+    }
+
     AllocMemPage &page = state.alloc_table[page_num];
     if (!page.allocated) {
         LOG_CRITICAL("Freeing unallocated page");
