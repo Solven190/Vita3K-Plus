@@ -655,10 +655,11 @@ void buffer_address_access(spv::Builder &b, const SpirvShaderParameters &params,
 
     spv::Id buffer_idx_val;
     if (buffer_idx == -1) {
-        // buffer index is in the upper 4 bits of addr
-        buffer_idx_val = b.createBinOp(spv::OpShiftRightLogical, i32, addr, b.makeIntConstant(28));
-        // remove the buffer index bits from the address
-        addr = b.createBinOp(spv::OpBitwiseAnd, i32, addr, b.makeIntConstant((1 << 28) - 1));
+        // The offset may be negative (buffer bases are ~ -4), so recover the index by rounding to the nearest 2^28 boundary and keep the offset as a signed remainder
+        const spv::Id biased = b.createBinOp(spv::OpIAdd, i32, addr, b.makeIntConstant(1 << 27));
+        buffer_idx_val = b.createBinOp(spv::OpShiftRightLogical, i32, biased, b.makeIntConstant(28));
+        const spv::Id idx_hi = b.createBinOp(spv::OpShiftLeftLogical, i32, buffer_idx_val, b.makeIntConstant(28));
+        addr = b.createBinOp(spv::OpISub, i32, addr, idx_hi);
     } else {
         buffer_idx_val = b.makeIntConstant(buffer_idx);
     }
@@ -666,7 +667,7 @@ void buffer_address_access(spv::Builder &b, const SpirvShaderParameters &params,
     spv::Id buffer_address = utils::create_access_chain(b, spv::StorageClassUniform, params.render_info_id, { b.makeIntConstant(params.buffer_addresses_id), buffer_idx_val });
     buffer_address = b.createLoad(buffer_address, spv::NoPrecision);
     // add the offset from the base address
-    buffer_address = add_uvec2_uint(b, buffer_address, addr);
+    buffer_address = add_uvec2_int(b, buffer_address, addr);
 
     if (component_size == sizeof(uint32_t)) {
         int buffer_idx_vec4 = 0;
@@ -1630,6 +1631,29 @@ spv::Id add_uvec2_uint(spv::Builder &b, spv::Id vec, spv::Id to_add) {
     spv::Id carry = b.createCompositeExtract(lower_add, u32, 1);
     spv::Id upper = b.createCompositeExtract(vec, u32, 1);
     upper = b.createBinOp(spv::OpIAdd, u32, upper, carry);
+    lower = b.createCompositeExtract(lower_add, u32, 0);
+    return b.createCompositeConstruct(uvec2, { lower, upper });
+}
+
+spv::Id add_uvec2_int(spv::Builder &b, spv::Id vec, spv::Id to_add_signed) {
+    const spv::Id u32 = b.makeUintType(32);
+    const spv::Id i32 = b.makeIntType(32);
+    const spv::Id uvec2 = b.makeVectorType(u32, 2);
+    const spv::Id add_result_type = b.makeStructResultType(u32, u32);
+
+    spv::Id to_add_i = b.isUintType(b.getTypeId(to_add_signed))
+        ? b.createUnaryOp(spv::OpBitcast, i32, to_add_signed)
+        : to_add_signed;
+    spv::Id sign = b.createBinOp(spv::OpShiftRightArithmetic, i32, to_add_i, b.makeIntConstant(31));
+    sign = b.createUnaryOp(spv::OpBitcast, u32, sign);
+    spv::Id to_add = b.createUnaryOp(spv::OpBitcast, u32, to_add_i);
+
+    spv::Id lower = b.createCompositeExtract(vec, u32, 0);
+    spv::Id lower_add = b.createBinOp(spv::OpIAddCarry, add_result_type, lower, to_add);
+    spv::Id carry = b.createCompositeExtract(lower_add, u32, 1);
+    spv::Id upper = b.createCompositeExtract(vec, u32, 1);
+    upper = b.createBinOp(spv::OpIAdd, u32, upper, carry);
+    upper = b.createBinOp(spv::OpIAdd, u32, upper, sign); // sign-extend the offset
     lower = b.createCompositeExtract(lower_add, u32, 0);
     return b.createCompositeConstruct(uvec2, { lower, upper });
 }
