@@ -336,8 +336,7 @@ int Camera::read(SceCameraRead *read, void *pIBase, void *pUBase, void *pVBase, 
                 LOG_ERROR_ONCE("Buffer sizes too small for YUV422 planar conversion: IBase {}, UBase {}, VBase {}, required I {}, U {}, V {}.", sizeIBase, sizeUBase, sizeVBase, width * height, (width / 2) * height, (width / 2) * height);
                 if (sizeIBase >= (SceSize)(width * height)) {
                     memcpy(pIBase, pImpl->frame->pixels, sizeIBase); // Copy Y plane only if buffer is large enough
-                }
-                else {
+                } else {
                     return SCE_CAMERA_ERROR_PARAM;
                 }
             }
