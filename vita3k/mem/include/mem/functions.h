@@ -60,6 +60,7 @@ void add_external_mapping(MemState &mem, Address addr, uint32_t size, uint8_t *a
 void remove_external_mapping(MemState &mem, uint8_t *addr_ptr, uint32_t size);
 bool is_protecting(MemState &state, Address addr, MemPerm *perm = nullptr);
 bool is_valid_addr(const MemState &state, Address addr);
+Address host_to_guest(const MemState &state, const void *host);
 bool is_valid_addr_range(const MemState &state, Address start, Address end);
 bool handle_access_violation(MemState &state, uint8_t *addr, bool write) noexcept;
 Block alloc_block(MemState &mem, uint32_t size, const char *name, Address start_addr = user_main_memory_start);

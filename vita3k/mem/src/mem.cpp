@@ -325,6 +325,29 @@ bool handle_access_violation(MemState &state, uint8_t *addr, bool write) noexcep
     return true;
 }
 
+Address host_to_guest(const MemState &state, const void *host) {
+    if (host == nullptr)
+        return 0;
+
+    const uint64_t host_val = std::bit_cast<uint64_t>(host);
+    const uint64_t memory_base = std::bit_cast<uint64_t>(state.memory.get());
+
+    // Fast path: the pointer is inside the linear guest-RAM window. Covers most conversions and takes no lock
+    if (host_val >= memory_base && host_val < memory_base + TOTAL_MEM_SIZE)
+        return static_cast<Address>(host_val - memory_base);
+
+    // Otherwise the pointer lives inside an external GPU mapping whose pages were pointed away
+    if (state.use_page_table) {
+        const std::lock_guard<std::mutex> ext_lock(state.external_mapping_mutex);
+        auto it = state.external_mapping.lower_bound(host_val);
+        if (it != state.external_mapping.end() && host_val < it->first + it->second.size)
+            return it->second.address + static_cast<Address>(host_val - it->first);
+    }
+
+    // Fallback: linear (likely a bogus pointer?)
+    return static_cast<Address>(host_val - memory_base);
+}
+
 bool add_protect(MemState &state, Address addr, const uint32_t size, const MemPerm perm, const ProtectCallback &callback) {
     const std::lock_guard<std::mutex> lock(state.protect_mutex);
     ProtectSegmentInfo protect(size, perm);
@@ -400,6 +423,7 @@ void add_external_mapping(MemState &mem, Address addr, uint32_t size, uint8_t *a
     mem.page_table[addr / KiB(4)] = page_table_entry;
 
     const std::unique_lock<std::mutex> lock(mem.protect_mutex);
+    const std::lock_guard<std::mutex> ext_lock(mem.external_mapping_mutex);
     mem.external_mapping[addr_value] = { addr, size };
 }
 
@@ -408,6 +432,7 @@ void remove_external_mapping(MemState &mem, uint8_t *addr_ptr, uint32_t size) {
     MemExternalMapping mapping;
     if (mem.use_page_table) {
         const std::unique_lock<std::mutex> lock(mem.protect_mutex);
+        const std::lock_guard<std::mutex> ext_lock(mem.external_mapping_mutex);
         auto it = mem.external_mapping.find(addr_value);
         assert(it != mem.external_mapping.end());
 
