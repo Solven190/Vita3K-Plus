@@ -25,6 +25,7 @@
 #include <shader/usse_types.h>
 #include <util/log.h>
 
+#include <algorithm>
 #include <numeric>
 
 using namespace shader;
@@ -756,7 +757,8 @@ bool USSETranslatorVisitor::vldst(
     spv::Id base = m_b.createBinOp(spv::OpIAdd, i32_type, source_0, source_1);
 
     if (m_features.enable_memory_mapping) {
-        utils::buffer_address_access(m_b, m_spirv_params, m_util_funcs, m_features, to_store, to_store_offset, base, get_data_type_size(type_to_ldst), current_number_to_fetch, -1, is_store);
+        const bool base_is_buffer_handle = inst.opr.src0.bank == RegisterBank::SECATTR && std::find(m_spirv_params.buffer_sa_offsets.begin(), m_spirv_params.buffer_sa_offsets.end(), static_cast<int>(inst.opr.src0.num)) != m_spirv_params.buffer_sa_offsets.end();
+        utils::buffer_address_access(m_b, m_spirv_params, m_util_funcs, m_features, to_store, to_store_offset, base, get_data_type_size(type_to_ldst), current_number_to_fetch, -1, is_store, !base_is_buffer_handle);
     } else {
         if (is_store) {
             LOG_ERROR("Store opcode is not supported without memory mapping");

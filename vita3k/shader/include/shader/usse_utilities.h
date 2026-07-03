@@ -51,7 +51,12 @@ spv::Id unpack_one(spv::Builder &b, SpirvUtilFunctions &utils, const FeatureStat
 spv::Id pack_one(spv::Builder &b, SpirvUtilFunctions &utils, const FeatureState &features, spv::Id vec, const DataType source_type);
 
 spv::Id fetch_memory(spv::Builder &b, const SpirvShaderParameters &params, SpirvUtilFunctions &utils, spv::Id addr);
-void buffer_address_access(spv::Builder &b, const SpirvShaderParameters &params, SpirvUtilFunctions &utils, const FeatureState &features, Operand dest, int dest_offset, spv::Id addr, uint32_t component_size, uint32_t nb_components, int buffer_idx = -1, bool is_buffer_store = false);
+// translate_base: when true, the load's base is NOT an encoded uniform-buffer handle (it came from
+// a non-uniform register bank), so it is a junk computed "pointer"; the access is redirected to the
+// first uniform buffer (buffer_addresses[0], offset 0) so it reads harmless data instead of
+// faulting. When false, `addr` is an encoded index<<28 handle resolved through buffer_addresses[]
+// (the normal uniform-buffer fast path).
+void buffer_address_access(spv::Builder &b, const SpirvShaderParameters &params, SpirvUtilFunctions &utils, const FeatureState &features, Operand dest, int dest_offset, spv::Id addr, uint32_t component_size, uint32_t nb_components, int buffer_idx = -1, bool is_buffer_store = false, bool translate_base = false);
 
 spv::Id make_vector_or_scalar_type(spv::Builder &b, spv::Id component, int size);
 
