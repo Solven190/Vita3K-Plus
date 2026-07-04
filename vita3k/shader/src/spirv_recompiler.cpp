@@ -1000,6 +1000,8 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
     const uint16_t uniform_buffer_count = features.enable_memory_mapping ? buffer_count : 0;
     const uint16_t uniform_texture_count = features.use_texture_viewport ? texture_count : 0;
 
+    spv_params.buffer_count = uniform_buffer_count;
+
     if (program_type == SceGxmProgramType::Vertex) {
         // Create the default reg uniform buffer
         std::vector<spv::Id> uniform_composition = { v4, f32, f32, f32, f32, f32 };
