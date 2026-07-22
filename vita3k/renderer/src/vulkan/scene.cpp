@@ -37,7 +37,10 @@ void set_uniform_buffer(VKContext &context, MemState &mem, const ShaderProgram *
     if (context.state.features.enable_memory_mapping) {
         if (context.state.mapping_method == MappingMethod::DoubleBuffer) {
             // we must always cover everything as some small part of the buffer may get changed only
-            context.state.buffer_trapping.access_buffer(data.address(), data_size_upload, mem, false, true);
+            const bool aliases_surface = context.state.surface_cache.sync_surface_for_gpu_read(data.address(), data_size_upload);
+            if (!aliases_surface && context.state.mapping_method == MappingMethod::DoubleBuffer) {
+                context.state.buffer_trapping.access_buffer(data.address(), data_size_upload, mem, false, true);
+            }
         }
 
         const uint64_t buffer_address = context.state.get_matching_device_address(data.address());

@@ -116,11 +116,19 @@ struct ColorSurfaceCacheInfo : public SurfaceCacheInfo {
     // only for double buffer, do we need to sync the two views?
     bool need_buffer_sync = false;
 
+    // the surface is synced only for GPU raw buffer reads: keep the data in the mapped
+    // GPU buffer but skip the write-back to guest RAM (a CPU-side write-back would trip the
+    // surface's own dirty trap and force a full re-upload of the surface every frame)
+    bool gpu_read_sync_only = false;
     std::shared_ptr<bool> dirty = std::make_shared<bool>(false);
 
     ColorSurfaceCacheInfo() = default;
     ~ColorSurfaceCacheInfo();
 };
+
+// set while the emulator itself writes surface data back to guest memory, so the
+// surface write traps can tell emulator write-backs apart from genuine guest writes
+extern thread_local bool surface_sync_internal_write;
 
 struct DepthSurfaceView {
     vkutil::Image depth_view;
@@ -221,7 +229,14 @@ private:
     // lazily build the reinterpret compute pipeline (no-op once built)
     void ensure_reinterpret_pipeline();
 
-public:
+    // record and submit a one-off command buffer that copies the surface image into the
+    // mapped memory buffer at its guest address (shared by check_for_surface and
+    // sync_surface_for_gpu_read). If mem is non-null, the whole sync (fence wait, guest RAM
+    // write-back, post sync) completes synchronously before returning, and only
+    // [sync_addr, sync_addr + sync_size) is written to guest RAM: a surface's address range
+    // can be a memory pool that also holds CPU-written data (e.g. transfer destinations),
+    // which a full-range write-back would clobber with stale image content.
+    void submit_immediate_surface_sync(ColorSurfaceCacheInfo &surface, MemState *mem, Address sync_addr = 0, uint32_t sync_size = 0);public:
     // when creating a mutable image, can we pass as an argument
     // the possible format used for an image view to improve performance ?
     bool support_image_format_specifier = false;
@@ -249,6 +264,13 @@ public:
     // if this call is used for a copy or similar operation set the changed address to the destination
     // so that subsequent calls to check_for_surface with the target destination also get delayed
     bool check_for_surface(MemState &mem, Address source_address, CallbackRequestFunction &callback, Address target_address);
+    // Called when a guest address is about to be read by the GPU through raw buffer
+    // accesses (e.g. a uniform buffer aliasing a rendered surface, like Killzone Mercenary's
+    // bloom chain reading its HDR render target). If the address lies inside a
+    // recently-rendered color surface, make sure the surface content is synced into the
+    // mapped memory buffer so the shader reads up-to-date data. Returns true if the address
+    // belongs to such a surface.
+    bool sync_surface_for_gpu_read(Address address, uint32_t size);
 
     // If non-null, the return value must be sent as a PostSurfaceSyncRequest
     ColorSurfaceCacheInfo *perform_surface_sync();

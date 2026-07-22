@@ -253,7 +253,8 @@ void destroy(SceGxmSyncObject *sync, State &state, std::function<void()> dealloc
     if (dealloc && state.current_backend == Backend::Vulkan && state.features.enable_memory_mapping) {
         auto *vk_state = static_cast<vulkan::VKState *>(&state);
         vk_state->request_queue.push(vulkan::CallbackRequest{
-            new vulkan::CallbackRequestFunction(std::move(dealloc)) });
+            new vulkan::CallbackRequestFunction(std::move(dealloc))
+        });
     } else if (dealloc) {
         dealloc();
     }

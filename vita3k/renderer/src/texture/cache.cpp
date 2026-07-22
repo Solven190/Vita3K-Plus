@@ -22,6 +22,7 @@
 
 #include <gxm/functions.h>
 #include <mem/ptr.h>
+#include <mem/functions.h>
 #include <util/align.h>
 #include <util/log.h>
 
@@ -52,6 +53,12 @@ uint64_t hash_texture_data(const SceGxmTexture &texture, uint32_t texture_size, 
     const SceGxmTextureBaseFormat base_format = gxm::get_base_format(format);
     const Ptr<const void> data(texture.data_addr << 2);
     uint64_t data_hash = 0;
+
+    // the texture memory may have been freed by the game while this bind was queued
+    if (data.address() && !is_valid_addr_range(mem, data.address(), data.address() + texture_size)) {
+        LOG_WARN_ONCE("Texture data not in valid memory (addr=0x{:08X} size={}), not hashing", data.address(), texture_size);
+        return 0;
+    }
 
     if (data.address()) {
         data_hash = hash_data(data.get(mem), texture_size);
@@ -435,6 +442,17 @@ void TextureCache::upload_texture(const SceGxmTexture &gxm_texture, MemState &me
         }
         pixels_per_stride = align(pixels_per_stride, align_width);
         memory_height = align(memory_height, align_height);
+
+        // A queued bind can be processed after the game released the staging memory, and reading it crashes on decommitted
+        {
+            const uint32_t src_nb_pixels = align(layout_width, align_width) * align(layout_height, align_height);
+            const uint32_t src_mip_size = (src_nb_pixels >> block_shift) * block_size;
+            const Address src_address = (gxm_texture.data_addr << 2) + total_source_so_far;
+            if (src_mip_size > 0 && !is_valid_addr_range(mem, src_address, src_address + src_mip_size)) {
+                LOG_WARN("Texture upload source is not in valid memory (addr=0x{:08X} size={}), skipping upload", src_address, src_mip_size);
+                break;
+            }
+        }
 
         // perform all needed conversions (formats not supported by modern GPUs)
         switch (base_format) {

@@ -149,6 +149,15 @@ void VKSurfaceCache::destroy_surface(ColorSurfaceCacheInfo &info) {
 
     destroy_framebuffers(info.texture.view);
     destroy_queue.add_image(info.texture);
+
+    if (info.blit_image) {
+        destroy_queue.add_image(*info.blit_image);
+        info.blit_image.reset();
+    }
+    if (info.copy_buffer) {
+        destroy_queue.add_buffer(*info.copy_buffer);
+        info.copy_buffer.reset();
+    }
 }
 
 void VKSurfaceCache::destroy_surface(DepthStencilSurfaceCacheInfo &info) {
@@ -424,6 +433,7 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_color_surface_for_framebuffer(Mem
     info_added.need_surface_sync.reset();
     info_added.need_surface_sync = std::make_shared<bool>(false);
     info_added.dirty = std::make_shared<bool>(false);
+    info_added.gpu_read_sync_only = false;
 
     // we only support surface sync of linear surfaces for now
     if (!can_mprotect_mapped_memory) {
@@ -465,8 +475,7 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
     if (!overlap)
         return std::nullopt;
 
-    if (*ite->second->dirty)
-        // Guest wrote to the surface backing memory since it was rendered, so GPU data is stale.
+    if (*ite->second->dirty && ite->second->last_frame_rendered + 2 <= reinterpret_cast<VKContext *>(state.context)->frame_timestamp)
         return std::nullopt;
 
     const vk::ComponentMapping swizzle = texture::translate_swizzle(gxm::get_format(texture));
@@ -674,6 +683,16 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
 
             casted->texture.format = (bytes_per_pixel_requested != bytes_per_pixel_in_store && store_is_f16(info.format)) ? force_unsigned_reinterpret_format(vk_format) : vk_format;
 
+            // Vita render targets store linear data as raw bytes — no gamma encoding.
+            // When a game reads this surface as an sRGB texture, the decode must happen
+            // only at sampling time.  Create the image in the source (UNORM) format so
+            // the blit copies raw bytes, then attach an sRGB view for the sampler.
+            const bool needs_srgb_view = is_srgb
+                && casted->texture.format == vk::Format::eR8G8B8A8Srgb
+                && info.texture.format == vk::Format::eR8G8B8A8Unorm;
+            if (needs_srgb_view)
+                casted->texture.format = vk::Format::eR8G8B8A8Unorm;
+
             // find the swizzle we need to apply
             const std::uint8_t components_in_store = vk::componentCount(info.texture.format);
             const std::uint8_t components_requested = vk::componentCount(vk_format);
@@ -691,8 +710,22 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
                 casted->texture.init_image(vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eStorage, resulting_swizzle, vk::ImageCreateFlagBits::eMutableFormat);
                 casted->texture.transition_to(cmd_buffer, vkutil::ImageLayout::StorageImage);
             } else {
-                casted->texture.init_image(vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst, resulting_swizzle);
+                casted->texture.init_image(vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst, resulting_swizzle, needs_srgb_view ? vk::ImageCreateFlagBits::eMutableFormat : vk::ImageCreateFlags());
                 casted->texture.transition_to(cmd_buffer, vkutil::ImageLayout::TransferDst);
+            }
+
+            if (needs_srgb_view) {
+                state.device.destroyImageView(casted->texture.view);
+                vk::ImageSubresourceRange srgb_range = vkutil::color_subresource_range;
+                vk::ImageViewCreateInfo srgb_view_info{
+                    .image = casted->texture.image,
+                    .viewType = vk::ImageViewType::e2D,
+                    .format = vk::Format::eR8G8B8A8Srgb,
+                    .components = resulting_swizzle,
+                    .subresourceRange = srgb_range
+                };
+                casted->texture.view = state.device.createImageView(srgb_view_info);
+                casted->texture.format = vk::Format::eR8G8B8A8Srgb;
             }
         } else {
             casted->texture.transition_to_discard(cmd_buffer, use_compute_deinterleave ? vkutil::ImageLayout::StorageImage : vkutil::ImageLayout::TransferDst);
@@ -1383,6 +1416,114 @@ bool VKSurfaceCache::check_for_surface(MemState &mem, Address source_address, Ca
     return true;
 }
 
+void VKSurfaceCache::submit_immediate_surface_sync(ColorSurfaceCacheInfo &surface, MemState *mem, Address sync_addr, uint32_t sync_size) {
+    VKContext &context = *static_cast<VKContext *>(state.context);
+
+    // first send the command to sync the surface with the GPU
+    *surface.need_surface_sync = true;
+
+    // we shouldn't have a command buffer being used, but just in case
+    vk::CommandBuffer prev_cmd = context.render_cmd;
+    // this can be called mid-scene, so preserve the scene's last written surface
+    ColorSurfaceCacheInfo *prev_last_written = last_written_surface;
+
+    // for the time being, just create a temp command buffer / fence
+    // That's not the best approach but I guess it works
+    vk::CommandBuffer surface_cmd = nullptr;
+    vk::Fence fence = state.device.createFence({});
+    ColorSurfaceCacheInfo *returned_info = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(state.multithread_pool_mutex);
+        surface_cmd = vkutil::create_single_time_command(state.device, state.multithread_command_pool);
+
+        context.render_cmd = surface_cmd;
+        last_written_surface = &surface;
+        returned_info = perform_surface_sync();
+        context.render_cmd = prev_cmd;
+        last_written_surface = (prev_last_written == &surface) ? nullptr : prev_last_written;
+
+        surface_cmd.end();
+    }
+    // submit this command
+    vk::SubmitInfo submit_info{};
+    submit_info.setCommandBuffers(surface_cmd);
+    state.general_queue.submit(submit_info, fence);
+
+    if (mem != nullptr) {
+        // synchronous completion: the caller (a CPU operation like sceGxmTransfer) needs the
+        // guest memory content to be correct and ordered exactly like the hardware transfer
+        // unit would — wait for the copy and write guest RAM before returning
+        auto result = state.device.waitForFences(fence, vk::True, std::numeric_limits<uint64_t>::max());
+        if (result != vk::Result::eSuccess)
+            LOG_ERROR("Could not wait for fences.");
+        state.device.destroyFence(fence);
+        {
+            std::lock_guard<std::mutex> lock(state.multithread_pool_mutex);
+            state.device.freeCommandBuffers(state.multithread_command_pool, surface_cmd);
+        }
+
+        if (returned_info) {
+            perform_post_surface_sync(*mem, returned_info);
+        }
+        return;
+    }
+
+    // asynchronous completion: wait for the fence on the wait thread, then destroy it along
+    // with the command buffer to prevent memory leaks
+    CallbackRequestFunction vk_callback = [&state = this->state, fence, surface_cmd]() {
+        auto result = state.device.waitForFences(fence, vk::True, std::numeric_limits<uint64_t>::max());
+        if (result != vk::Result::eSuccess)
+            LOG_ERROR("Could not wait for fences.");
+
+        // destroy the objects
+        state.device.destroyFence(fence);
+
+        std::lock_guard<std::mutex> lock(state.multithread_pool_mutex);
+        state.device.freeCommandBuffers(state.multithread_command_pool, surface_cmd);
+    };
+    state.request_queue.push(CallbackRequest{ new CallbackRequestFunction(std::move(vk_callback)) });
+
+    if (returned_info) {
+            state.request_queue.push(PostSurfaceSyncRequest{ returned_info });
+    }
+}
+
+bool VKSurfaceCache::sync_surface_for_gpu_read(Address address, uint32_t size) {
+    if (!state.features.enable_memory_mapping || state.disable_surface_sync)
+        return false;
+
+    // Range-based lookup: find the surface whose base address is <= address
+    auto it = color_address_lookup.upper_bound(address);
+    if (it == color_address_lookup.begin())
+        return false;
+    --it;
+
+    auto &surface = *it->second;
+    if (it->first != address) {
+        constexpr uint32_t min_surface_read_size = KiB(16);
+        const bool contained = address >= it->first
+            && static_cast<uint64_t>(address) + size <= static_cast<uint64_t>(it->first) + surface.total_bytes;
+        const bool engaged = contained && (size == 0 || size >= min_surface_read_size);
+        if (!engaged)
+            return false;
+    }
+
+    VKContext &context = *static_cast<VKContext *>(state.context);
+    // if the surface has not been rendered recently, its memory content is as up to date as it gets
+    if (surface.last_frame_rendered + MAX_FRAMES_RENDERING <= context.frame_timestamp)
+        return false;
+
+    // once need_surface_sync is set, the end-of-scene sync in perform_surface_sync keeps the
+    // memory up to date every time the surface is rendered, so only the first read needs this
+    if (!*surface.need_surface_sync) {
+        // GPU-only readers don't need the data written back to guest RAM
+        surface.gpu_read_sync_only = true;
+        submit_immediate_surface_sync(surface, nullptr);
+    }
+
+    return true;
+}
+
 ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
     // surface sync is supported only if memory mapping is enabled
     if (!state.features.enable_memory_mapping)
@@ -1460,7 +1601,7 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
         last_written_surface->need_buffer_sync = false;
         last_written_surface->need_post_surface_sync = true;
     } else {
-        last_written_surface->need_buffer_sync = true;
+        last_written_surface->need_buffer_sync = !last_written_surface->gpu_read_sync_only;
         last_written_surface->need_post_surface_sync = !is_swizzle_identity;
         std::tie(buffer, offset) = state.get_matching_mapping(last_written_surface->data);
     }

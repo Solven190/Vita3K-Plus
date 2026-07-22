@@ -520,7 +520,53 @@ bool USSETranslatorVisitor::vpck(
         source = utils::convert_to_int(m_b, m_util_funcs, source, inst.opr.dest.type, scale);
     }
 
-    store(inst.opr.dest, source, dest_mask, dest_repeat_offset);
+    // VPCK writes complete packed slots zero-fill unmasked components within each
+    // 32-bit register slot to match real SGX543 behavior. Without this, old register
+    // contents leak into subsequent 32-bit operations (e.g. IMAD) that read the full slot.
+    Imm4 store_mask = dest_mask;
+    if (is_integer_data_type(inst.opr.dest.type) && get_data_type_size(inst.opr.dest.type) < 4) {
+        const int pack = (get_data_type_size(inst.opr.dest.type) == 1) ? 4 : 2;
+        Imm4 expanded = 0;
+        for (int s = 0; s < 4; s += pack) {
+            Imm4 slot_bits = ((1 << pack) - 1) << s;
+            if (dest_mask & slot_bits)
+                expanded |= slot_bits;
+        }
+
+        if (expanded != dest_mask) {
+            spv::Id comp_type = m_b.isScalar(source) ? m_b.getTypeId(source) : m_b.getContainedTypeId(m_b.getTypeId(source));
+            spv::Id zero_val = m_b.isUintType(comp_type) ? m_b.makeUintConstant(0) : m_b.makeIntConstant(0);
+
+            std::vector<spv::Id> comps;
+            int src_idx = 0;
+            for (int i = 0; i < 4; i++) {
+                if (!(expanded & (1 << i)))
+                    continue;
+                if (dest_mask & (1 << i)) {
+                    if (m_b.getNumComponents(source) == 1)
+                        comps.push_back(source);
+                    else
+                        comps.push_back(m_b.createCompositeExtract(source, comp_type, src_idx));
+                    src_idx++;
+                } else {
+                    // preserve the slot's existing lane so earlier partial VPCK writes survive
+                    //spv::Id existing = load(inst.opr.dest, (1 << i), dest_repeat_offset);
+                    //comps.push_back(existing);    // Works for Uncharted
+                    comps.push_back(zero_val);      // Works for Killzone
+                }
+            }
+
+            if (comps.size() == 1) {
+                source = comps[0];
+            } else {
+                source = m_b.createCompositeConstruct(utils::make_vector_or_scalar_type(m_b, comp_type, static_cast<int>(comps.size())), comps);
+            }
+            store_mask = expanded;
+        }
+    }
+
+    store(inst.opr.dest, source, store_mask, dest_repeat_offset);
+
     END_REPEAT()
 
     reset_repeat_multiplier();
