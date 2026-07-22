@@ -230,11 +230,10 @@ COMMAND(handle_transfer_copy) {
         delete[] images;
     };
 
-
     if (renderer.current_backend == Backend::Vulkan && renderer.features.enable_memory_mapping && !renderer.disable_surface_sync) {
         const uint32_t src_read_size = images[0].stride * (images[0].y + images[0].height);
         const uint32_t dst_write_size = images[1].stride * (images[1].y + images[1].height);
-        if (dynamic_cast<vulkan::VKState &>(renderer).surface_cache.check_for_surface(mem, images[0].address.address(), copy_operation, images[1].address.address()/*, src_read_size, dst_write_size*/)) {
+        if (dynamic_cast<vulkan::VKState &>(renderer).surface_cache.check_for_surface(mem, images[0].address.address(), copy_operation, images[1].address.address() /*, src_read_size, dst_write_size*/)) {
             LOG_WARN_ONCE("transfer_copy: surface-synced src=0x{:08X}→dst=0x{:08X} fmt=0x{:X} {}x{} srcXY=({},{}) dstXY=({},{})",
                 images[0].address.address(), images[1].address.address(),
                 fmt::underlying(src_fmt), images[0].width, images[0].height,
@@ -333,12 +332,11 @@ COMMAND(handle_transfer_downscale) {
         delete dst;
     };
 
-
     if (renderer.current_backend == Backend::Vulkan && renderer.features.enable_memory_mapping && !renderer.disable_surface_sync) {
         // src->address has already been adjusted to the first read byte above
         const uint32_t src_read_size = src->stride * src->height;
         const uint32_t dst_write_size = dst->stride * dst->height;
-        if (dynamic_cast<vulkan::VKState &>(renderer).surface_cache.check_for_surface(mem, src->address.address(), downscale_operation, dst->address.address()/*, src_read_size, dst_write_size*/))
+        if (dynamic_cast<vulkan::VKState &>(renderer).surface_cache.check_for_surface(mem, src->address.address(), downscale_operation, dst->address.address() /*, src_read_size, dst_write_size*/))
             // let the vulkan surface cache handle it
             return;
     }
