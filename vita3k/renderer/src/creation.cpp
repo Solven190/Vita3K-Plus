@@ -249,8 +249,15 @@ void create(SceGxmSyncObject *sync, State &state) {
     sync->being_deleted = false;
 }
 
-void destroy(SceGxmSyncObject *sync, State &state) {
-    // nothing to do right now
+void destroy(SceGxmSyncObject *sync, State &state, std::function<void()> dealloc) {
+    if (dealloc && state.current_backend == Backend::Vulkan && state.features.enable_memory_mapping) {
+        auto *vk_state = static_cast<vulkan::VKState *>(&state);
+        vk_state->request_queue.push(vulkan::CallbackRequest{
+            new vulkan::CallbackRequestFunction(std::move(dealloc))
+        });
+    } else if (dealloc) {
+        dealloc();
+    }
 }
 
 bool init(FrameHost &frame, std::unique_ptr<State> &state, Backend backend, const Config &config, const Root &root_paths) {
