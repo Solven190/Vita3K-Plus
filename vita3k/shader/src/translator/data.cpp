@@ -520,9 +520,9 @@ bool USSETranslatorVisitor::vpck(
         source = utils::convert_to_int(m_b, m_util_funcs, source, inst.opr.dest.type, scale);
     }
 
-    // VPCK writes complete packed slots zero-fill unmasked components within each
-    // 32-bit register slot to match real SGX543 behavior. Without this, old register
-    // contents leak into subsequent 32-bit operations (e.g. IMAD) that read the full slot.
+    const uint32_t vpck_key = (static_cast<uint32_t>(inst.opr.dest.bank) << 24) | ((inst.opr.dest.num + dest_repeat_offset) & 0xFFFFFF);
+    const std::uint8_t prev_lanes = m_vpck_written_lanes.count(vpck_key) ? m_vpck_written_lanes[vpck_key] : 0;
+
     Imm4 store_mask = dest_mask;
     if (is_integer_data_type(inst.opr.dest.type) && get_data_type_size(inst.opr.dest.type) < 4) {
         const int pack = (get_data_type_size(inst.opr.dest.type) == 1) ? 4 : 2;
@@ -533,14 +533,17 @@ bool USSETranslatorVisitor::vpck(
                 expanded |= slot_bits;
         }
 
-        if (expanded != dest_mask) {
+        const Imm4 zero_lanes = expanded & ~dest_mask & ~static_cast<Imm4>(prev_lanes);
+        const Imm4 target_mask = dest_mask | zero_lanes;
+
+        if (zero_lanes != 0) {
             spv::Id comp_type = m_b.isScalar(source) ? m_b.getTypeId(source) : m_b.getContainedTypeId(m_b.getTypeId(source));
             spv::Id zero_val = m_b.isUintType(comp_type) ? m_b.makeUintConstant(0) : m_b.makeIntConstant(0);
 
             std::vector<spv::Id> comps;
             int src_idx = 0;
             for (int i = 0; i < 4; i++) {
-                if (!(expanded & (1 << i)))
+                if (!(target_mask & (1 << i)))
                     continue;
                 if (dest_mask & (1 << i)) {
                     if (m_b.getNumComponents(source) == 1)
@@ -549,10 +552,7 @@ bool USSETranslatorVisitor::vpck(
                         comps.push_back(m_b.createCompositeExtract(source, comp_type, src_idx));
                     src_idx++;
                 } else {
-                    // preserve the slot's existing lane so earlier partial VPCK writes survive
-                    //spv::Id existing = load(inst.opr.dest, (1 << i), dest_repeat_offset);
-                    //comps.push_back(existing);    // Works for Uncharted
-                    comps.push_back(zero_val);      // Works for Killzone
+                    comps.push_back(zero_val);
                 }
             }
 
@@ -561,11 +561,14 @@ bool USSETranslatorVisitor::vpck(
             } else {
                 source = m_b.createCompositeConstruct(utils::make_vector_or_scalar_type(m_b, comp_type, static_cast<int>(comps.size())), comps);
             }
-            store_mask = expanded;
+            store_mask = target_mask;
         }
     }
 
+    m_vpck_written_lanes[vpck_key] = static_cast<std::uint8_t>(prev_lanes | dest_mask);
+    m_store_from_vpck = true;
     store(inst.opr.dest, source, store_mask, dest_repeat_offset);
+    m_store_from_vpck = false;
 
     END_REPEAT()
 

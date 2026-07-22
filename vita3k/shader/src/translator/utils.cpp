@@ -32,6 +32,9 @@ spv::Id USSETranslatorVisitor::load(Operand op, const Imm4 dest_mask, const int 
 }
 
 void USSETranslatorVisitor::store(Operand dest, spv::Id source, std::uint8_t dest_mask, int shift_offset) {
+    if (!m_store_from_vpck) {
+        m_vpck_written_lanes.erase((static_cast<uint32_t>(dest.bank) << 24) | ((dest.num + shift_offset) & 0xFFFFFF));
+    }
     utils::store(m_b, m_spirv_params, m_util_funcs, m_features, dest, source, dest_mask, shift_offset);
 }
 
