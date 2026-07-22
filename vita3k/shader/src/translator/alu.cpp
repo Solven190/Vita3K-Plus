@@ -758,16 +758,16 @@ bool USSETranslatorVisitor::vcomp(
     }
 
     case Opcode::VLOG: {
-        // src0 = e^y => return y
-        result = m_b.createBuiltinCall(m_b.getTypeId(result), std_builtins, GLSLstd450Log, { result });
+        // src0 = 2^y => return y (USSE complex unit is base-2)
+        result = m_b.createBuiltinCall(m_b.getTypeId(result), std_builtins, GLSLstd450Log2, { result });
         break;
     }
 
     case Opcode::VEXP: {
-        // y = e^src0 => return y
+        // y = 2^src0 => return y (USSE complex unit is base-2)
         // hack (kind of) :
         // define exp(Nan) as 1.0, this is needed for Freedom Wars to render properly
-        const spv::Id exp_val = m_b.createBuiltinCall(m_b.getTypeId(result), std_builtins, GLSLstd450Exp, { result });
+        const spv::Id exp_val = m_b.createBuiltinCall(m_b.getTypeId(result), std_builtins, GLSLstd450Exp2, { result });
         const spv::Id ones = utils::make_uniform_vector_from_type(m_b, m_b.getTypeId(result), 1.0f);
         const spv::Id is_nan = m_b.createUnaryOp(spv::OpIsNan, m_b.makeBoolType(), result);
         result = m_b.createTriOp(spv::OpSelect, m_b.getTypeId(result), is_nan, ones, exp_val);
@@ -1860,12 +1860,13 @@ bool USSETranslatorVisitor::vdual(
             const spv::Id second = load(ops[1], write_mask_source);
             const spv::Op op = (m_b.getNumComponents(first) > 1) ? spv::OpDot : spv::OpFMul;
             result = m_b.createBinOp(op, type_f32, first, second);
+            result = postprocess_dot_result_for_store(m_b, result, write_mask_dest);
             break;
         }
         case Opcode::FEXP: {
             // hack: set exp(nan) = 1.0 (see VEXP)
             const spv::Id source = load(ops[0], write_mask_source);
-            result = m_b.createBuiltinCall(m_b.getTypeId(source), std_builtins, GLSLstd450Exp, { source });
+            result = m_b.createBuiltinCall(m_b.getTypeId(source), std_builtins, GLSLstd450Exp2, { source });
             const int num_comp = m_b.getNumComponents(source);
             const spv::Id ones = utils::make_uniform_vector_from_type(m_b, m_b.getTypeId(result), 1.0f);
             const spv::Id is_nan = m_b.createUnaryOp(spv::OpIsNan, utils::make_vector_or_scalar_type(m_b, m_b.makeBoolType(), num_comp), result);
@@ -1874,13 +1875,14 @@ bool USSETranslatorVisitor::vdual(
         }
         case Opcode::FLOG: {
             const spv::Id source = load(ops[0], write_mask_source);
-            result = m_b.createBuiltinCall(m_b.getTypeId(source), std_builtins, GLSLstd450Log, { source });
+            result = m_b.createBuiltinCall(m_b.getTypeId(source), std_builtins, GLSLstd450Log2, { source });
             break;
         }
         case Opcode::VSSQ: {
             const spv::Id source = load(ops[0], write_mask_source);
             const spv::Op op = (m_b.getNumComponents(source) > 1) ? spv::OpDot : spv::OpFMul;
             result = m_b.createBinOp(op, type_f32, source, source);
+            result = postprocess_dot_result_for_store(m_b, result, write_mask_dest);
             break;
         }
         case Opcode::FMAD:
