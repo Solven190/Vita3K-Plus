@@ -98,6 +98,7 @@ void mid_scene_flush(VKContext &context, const SceGxmNotification notification) 
         context.stop_recording(notification, empty_notification, submit);
         context.start_recording();
         context.scene_timestamp++;
+        context.scene_has_drawn = false;
     }
 }
 
@@ -329,6 +330,18 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     Ptr<void> indices, size_t count, uint32_t instance_count, MemState &mem, const Config &config) {
     void *indices_ptr = indices.get(mem);
 
+    if (context.record.front_depth_write_mode == SCE_GXM_DEPTH_WRITE_ENABLED)
+        context.scene_wrote_depth = true;
+
+    // record queued casted-texture copies BEFORE marking the draw, so the placement decision
+    // sees whether this scene had drawn prior to this draw
+    {
+        const uint16_t vert_texture_count = context.record.vertex_program.get(mem)->renderer_data->texture_count;
+        const uint16_t frag_texture_count = context.record.fragment_program.get(mem)->renderer_data->texture_count;
+        context.state.surface_cache.perform_pending_casts(context, vert_texture_count, frag_texture_count);
+    }
+    context.scene_has_drawn = true;
+
     context.check_for_macroblock_change(true);
 
     if (!context.in_renderpass)
@@ -338,7 +351,7 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     // we need to always load the depth-stencil after the first draw
     if (context.is_first_scene_draw && (context.state.features.support_shader_interlock || context.ignore_macroblock)) {
         // update the render pass to load and store the depth and stencil
-        context.current_render_pass = context.state.pipeline_cache.retrieve_render_pass(context.current_color_format, true, true, !context.record.color_surface.data);
+        context.current_render_pass = context.state.pipeline_cache.retrieve_render_pass(context.current_color_format, true, true, true, !context.record.color_surface.data);
         context.is_first_scene_draw = false;
     }
 

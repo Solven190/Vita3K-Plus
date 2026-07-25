@@ -133,7 +133,73 @@ void VKSurfaceCache::destroy_framebuffers(vk::ImageView view) {
     }
 }
 
+void VKSurfaceCache::record_pending_cast(PendingCast &cast, VKContext &context) {
+    const bool pre_scene = cast.info->last_scene_rendered == context.scene_timestamp && context.scene_has_drawn
+        && !context.scene_macroblock_flushed;
+    if (pre_scene) {
+        cast.record(context.prerender_cmd);
+        return;
+    }
+
+    if (context.in_renderpass)
+        context.stop_render_pass();
+
+    vk::ImageMemoryBarrier store_visible{
+        .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite | vk::AccessFlagBits::eShaderWrite,
+        .dstAccessMask = vk::AccessFlagBits::eTransferRead | vk::AccessFlagBits::eShaderRead,
+        .oldLayout = vk::ImageLayout::eGeneral,
+        .newLayout = vk::ImageLayout::eGeneral,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = cast.info->texture.image,
+        .subresourceRange = vkutil::color_subresource_range
+    };
+    context.render_cmd.pipelineBarrier(
+        vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eFragmentShader,
+        vk::PipelineStageFlagBits::eTransfer | vk::PipelineStageFlagBits::eComputeShader, {}, {}, {}, store_visible);
+
+    cast.record(context.render_cmd);
+}
+
+void VKSurfaceCache::perform_pending_casts(VKContext &context, uint16_t vert_texture_count, uint16_t frag_texture_count) {
+    if (pending_casts.empty())
+        return;
+
+    for (size_t i = 0; i < pending_casts.size();) {
+        bool used = false;
+        for (uint16_t unit = 0; unit < frag_texture_count && !used; unit++)
+            used = pending_casts[i].view == context.fragment_textures[unit].imageView;
+        for (uint16_t unit = 0; unit < vert_texture_count && !used; unit++)
+            used = pending_casts[i].view == context.vertex_textures[unit].imageView;
+
+        if (used) {
+            // move it out first: the recording can itself queue new casts
+            PendingCast cast = std::move(pending_casts[i]);
+            pending_casts.erase(pending_casts.begin() + i);
+            record_pending_cast(cast, context);
+            // start over, the vector may have changed
+            i = 0;
+        } else {
+            i++;
+        }
+    }
+}
+
+void VKSurfaceCache::flush_all_pending_casts() {
+    if (pending_casts.empty())
+        return;
+    VKContext *context = reinterpret_cast<VKContext *>(state.context);
+    // the vector is swapped out first: a copy can itself trigger surface operations
+    std::vector<PendingCast> casts;
+    casts.swap(pending_casts);
+    for (auto &cast : casts)
+        record_pending_cast(cast, *context);
+}
+
 void VKSurfaceCache::destroy_surface(ColorSurfaceCacheInfo &info) {
+    // queued casted copies may reference this surface: record them while everything is alive
+    flush_all_pending_casts();
+
     vkutil::DestroyQueue &destroy_queue = state.frame().destroy_queue;
 
     // don't forget to destroy in the right order
@@ -345,6 +411,7 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_color_surface_for_framebuffer(Mem
             constexpr uint64_t big_delay_between_frames = 60;
             state.pipeline_cache.can_use_deferred_compilation = context->frame_timestamp - info.last_frame_rendered < big_delay_between_frames;
             info.last_frame_rendered = context->frame_timestamp;
+            info.last_scene_rendered = context->scene_timestamp;
 
             if (vk_format == info.texture.format) {
                 return { info.texture.view, &info.texture };
@@ -376,6 +443,7 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_color_surface_for_framebuffer(Mem
 
     color_surface_queue.set_as_mru(&info_added);
     info_added.last_frame_rendered = context->frame_timestamp;
+    info_added.last_scene_rendered = context->scene_timestamp;
 
     color_address_lookup[address] = &info_added;
 
@@ -623,10 +691,10 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
                 casted = &casted_vec[i];
 
                 if (casted->scene_timestamp == scene_timestamp) {
-                    // already copied for this scene, don't do it again
+                    // already copied (or copy pending) for this scene, don't do it again
                     return TextureLookupResult{
                         casted->texture.view,
-                        casted->texture.layout,
+                        vkutil::ImageLayout::SampledImage,
                         casted->texture.format
                     };
                 }
@@ -637,9 +705,7 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
             }
         }
 
-        // use prerender cmd as we can't copy an image or use pipeline barriers in a render pass
-        VKContext *context = reinterpret_cast<VKContext *>(state.context);
-        vk::CommandBuffer cmd_buffer = context->prerender_cmd;
+        const bool casted_is_new = casted == nullptr;
 
         if (casted == nullptr) {
             // Try to crop + cast
@@ -683,7 +749,7 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
 
             casted->texture.format = (bytes_per_pixel_requested != bytes_per_pixel_in_store && store_is_f16(info.format)) ? force_unsigned_reinterpret_format(vk_format) : vk_format;
 
-            // Vita render targets store linear data as raw bytes — no gamma encoding.
+            // Vita render targets store linear data as raw bytes ï¿½ no gamma encoding.
             // When a game reads this surface as an sRGB texture, the decode must happen
             // only at sampling time.  Create the image in the source (UNORM) format so
             // the blit copies raw bytes, then attach an sRGB view for the sampler.
@@ -708,10 +774,8 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
                 // The compute pass writes this image through an R32_UINT storage view (created lazily at dispatch)
                 // the consumer still samples it through its real format view
                 casted->texture.init_image(vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eStorage, resulting_swizzle, vk::ImageCreateFlagBits::eMutableFormat);
-                casted->texture.transition_to(cmd_buffer, vkutil::ImageLayout::StorageImage);
             } else {
                 casted->texture.init_image(vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst, resulting_swizzle, needs_srgb_view ? vk::ImageCreateFlagBits::eMutableFormat : vk::ImageCreateFlags());
-                casted->texture.transition_to(cmd_buffer, vkutil::ImageLayout::TransferDst);
             }
 
             if (needs_srgb_view) {
@@ -727,11 +791,22 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
                 casted->texture.view = state.device.createImageView(srgb_view_info);
                 casted->texture.format = vk::Format::eR8G8B8A8Srgb;
             }
-        } else {
-            casted->texture.transition_to_discard(cmd_buffer, use_compute_deinterleave ? vkutil::ImageLayout::StorageImage : vkutil::ImageLayout::TransferDst);
         }
 
         casted->scene_timestamp = scene_timestamp;
+
+        const size_t casted_index = static_cast<size_t>(casted - casted_vec.data());
+        ColorSurfaceCacheInfo *info_ptr = &info;
+
+        auto record_cast = [this, info_ptr, casted_index, casted_is_new, use_compute_deinterleave,
+                               bytes_per_pixel_requested, bytes_per_pixel_in_store, width, height,
+                               original_width, original_height, start_x, start_sourced_line, data_delta, stride_bytes](vk::CommandBuffer cmd_buffer) {
+        ColorSurfaceCacheInfo &info = *info_ptr;
+        CastedTexture *casted = &info.casted_textures[casted_index];
+        if (casted_is_new)
+            casted->texture.transition_to(cmd_buffer, use_compute_deinterleave ? vkutil::ImageLayout::StorageImage : vkutil::ImageLayout::TransferDst);
+        else
+            casted->texture.transition_to_discard(cmd_buffer, use_compute_deinterleave ? vkutil::ImageLayout::StorageImage : vkutil::ImageLayout::TransferDst);
 
         if (bytes_per_pixel_requested == bytes_per_pixel_in_store) {
             const int32_t src_w = static_cast<int32_t>(std::min<uint32_t>(width, info.width - start_x));
@@ -869,10 +944,13 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
             }
         }
         casted->texture.transition_to(cmd_buffer, vkutil::ImageLayout::SampledImage);
+        };
+
+        pending_casts.push_back({ casted->texture.view, &info, std::move(record_cast) });
 
         return TextureLookupResult{
             casted->texture.view,
-            casted->texture.layout,
+            vkutil::ImageLayout::SampledImage,
             casted->texture.format
         };
     } else {
@@ -904,6 +982,37 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
             vk_format
         };
     }
+}
+
+bool VKSurfaceCache::begin_ds_scene_depth_check(const SceGxmDepthStencilSurface &depth_stencil, bool this_scene_stores, Address scene_color_addr) {
+    DepthStencilSurfaceCacheInfo *cached_info = nullptr;
+    if (depth_stencil.depth_data) {
+        auto it = depth_address_lookup.find(depth_stencil.depth_data.address());
+        if (it != depth_address_lookup.end())
+            cached_info = it->second;
+    } else if (depth_stencil.stencil_data) {
+        auto it = stencil_address_lookup.find(depth_stencil.stencil_data.address());
+        if (it != stencil_address_lookup.end())
+            cached_info = it->second;
+    }
+
+    pending_ds_scene = cached_info;
+    pending_ds_scene_stores = this_scene_stores;
+
+    if (cached_info == nullptr)
+        // surface not created yet: it will be created cleared, loading that is fine
+        return true;
+
+    const bool is_continuation = cached_info->last_scene_color_addr == scene_color_addr;
+    cached_info->last_scene_color_addr = scene_color_addr;
+
+    return cached_info->depth_content_stored || is_continuation;
+}
+
+void VKSurfaceCache::resolve_ds_scene_end(bool scene_wrote_depth) {
+    if (pending_ds_scene != nullptr && scene_wrote_depth)
+        pending_ds_scene->depth_content_stored = pending_ds_scene_stores;
+    pending_ds_scene = nullptr;
 }
 
 SurfaceRetrieveResult VKSurfaceCache::retrieve_depth_stencil_for_framebuffer(SceGxmDepthStencilSurface *depth_stencil, const uint32_t width, const uint32_t height) {
@@ -1330,7 +1439,7 @@ Framebuffer &VKSurfaceCache::retrieve_framebuffer_handle(MemState &mem, SceGxmCo
         fb_interlock = state.device.createFramebuffer(fb_info);
     }
 
-    return (framebuffer_array[key] = { fb_standard, fb_interlock, color_result.base_image });
+    return (framebuffer_array[key] = { fb_standard, fb_interlock, color_result.base_image, framebuffer_width, framebuffer_height });
 }
 
 bool VKSurfaceCache::check_for_surface(MemState &mem, Address source_address, CallbackRequestFunction &callback, Address target_address) {
@@ -1452,7 +1561,7 @@ void VKSurfaceCache::submit_immediate_surface_sync(ColorSurfaceCacheInfo &surfac
     if (mem != nullptr) {
         // synchronous completion: the caller (a CPU operation like sceGxmTransfer) needs the
         // guest memory content to be correct and ordered exactly like the hardware transfer
-        // unit would — wait for the copy and write guest RAM before returning
+        // unit would ï¿½ wait for the copy and write guest RAM before returning
         auto result = state.device.waitForFences(fence, vk::True, std::numeric_limits<uint64_t>::max());
         if (result != vk::Result::eSuccess)
             LOG_ERROR("Could not wait for fences.");
@@ -1484,7 +1593,7 @@ void VKSurfaceCache::submit_immediate_surface_sync(ColorSurfaceCacheInfo &surfac
     state.request_queue.push(CallbackRequest{ new CallbackRequestFunction(std::move(vk_callback)) });
 
     if (returned_info) {
-            state.request_queue.push(PostSurfaceSyncRequest{ returned_info });
+        state.request_queue.push(PostSurfaceSyncRequest{ returned_info });
     }
 }
 

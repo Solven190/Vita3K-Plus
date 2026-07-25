@@ -391,11 +391,12 @@ void PipelineCache::cleanup() {
 
     for (int i = 0; i < 2; i++)
         for (int j = 0; j < 2; j++)
-            for (int k = 0; k < 2; k++) {
-                for (auto &[fmt, pass] : render_passes[i][j][k])
-                    state.device.destroy(pass);
-                render_passes[i][j][k].clear();
-            }
+            for (int k = 0; k < 2; k++)
+                for (int l = 0; l < 2; l++) {
+                    for (auto &[fmt, pass] : render_passes[i][j][k][l])
+                        state.device.destroy(pass);
+                    render_passes[i][j][k][l].clear();
+                }
 
     for (auto &[fmt, pass] : shader_interlock_pass)
         state.device.destroy(pass);
@@ -536,8 +537,8 @@ vk::PipelineShaderStageCreateInfo PipelineCache::retrieve_shader(const SceGxmPro
     return shader_stage_info;
 }
 
-vk::RenderPass PipelineCache::retrieve_render_pass(vk::Format format, bool force_load, bool force_store, bool is_color_transient, bool no_color) {
-    auto &render_passes_map = no_color ? shader_interlock_pass : render_passes[is_color_transient][force_load][force_store];
+vk::RenderPass PipelineCache::retrieve_render_pass(vk::Format format, bool depth_load, bool stencil_load, bool force_store, bool is_color_transient, bool no_color) {
+    auto &render_passes_map = no_color ? shader_interlock_pass : render_passes[is_color_transient][depth_load][stencil_load][force_store];
 
     auto it = render_passes_map.find(format);
 
@@ -576,16 +577,16 @@ vk::RenderPass PipelineCache::retrieve_render_pass(vk::Format format, bool force
         .finalLayout = vk::ImageLayout::eGeneral
     };
 
-    vk::AttachmentLoadOp load_op = force_load ? vk::AttachmentLoadOp::eLoad : vk::AttachmentLoadOp::eClear;
     vk::AttachmentStoreOp store_op = force_store ? vk::AttachmentStoreOp::eStore : vk::AttachmentStoreOp::eDontCare;
     vk::AttachmentDescription ds_attachment{
         .format = state.deep_stencil_use,
         .samples = vk::SampleCountFlagBits::e1,
-        .loadOp = load_op,
+        .loadOp = depth_load ? vk::AttachmentLoadOp::eLoad : vk::AttachmentLoadOp::eClear,
         .storeOp = store_op,
-        .stencilLoadOp = load_op,
+        .stencilLoadOp = stencil_load ? vk::AttachmentLoadOp::eLoad : vk::AttachmentLoadOp::eClear,
         .stencilStoreOp = store_op,
-        .initialLayout = force_load ? vk::ImageLayout::eDepthStencilReadOnlyOptimal : vk::ImageLayout::eUndefined,
+        // eUndefined would allow discarding a loaded aspect, so use it only when neither aspect is loaded
+        .initialLayout = (depth_load || stencil_load) ? vk::ImageLayout::eDepthStencilReadOnlyOptimal : vk::ImageLayout::eUndefined,
         .finalLayout = vk::ImageLayout::eDepthStencilReadOnlyOptimal
     };
 

@@ -27,6 +27,8 @@
 #include <util/log.h>
 #include <util/overloaded.h>
 
+#include <algorithm>
+
 namespace renderer::vulkan {
 
 void VKContext::wait_thread_function(const MemState &mem) {
@@ -125,6 +127,11 @@ void VKContext::wait_thread_function(const MemState &mem) {
 }
 
 void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const FeatureState &features) {
+    context.state.surface_cache.resolve_ds_scene_end(context.scene_wrote_depth);
+    context.scene_wrote_depth = false;
+    context.scene_has_drawn = false;
+    context.scene_macroblock_flushed = false;
+
     context.render_target = rt;
     context.scene_timestamp++;
     context.state.texture_cache.current_scene_timestamp = context.scene_timestamp;
@@ -158,9 +165,10 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
     }
 
     SceGxmDepthStencilSurface *ds_surface_fin = &context.record.depth_stencil_surface;
-    // if the depth-stencil buffer is not backed by memory or we don't read nor write it to memory, use the transient attachment instead
-    if ((!ds_surface_fin->depth_data && !ds_surface_fin->stencil_data)
-        || (!ds_surface_fin->force_load && !ds_surface_fin->force_store)) {
+    // if the depth-stencil buffer is not backed by memory, use the transient attachment instead.
+    // Was the Android build that added the changes:
+    // || (!ds_surface_fin->force_load && !ds_surface_fin->force_store)) {
+    if (!ds_surface_fin->depth_data && !ds_surface_fin->stencil_data) {
         ds_surface_fin = nullptr;
     }
 
@@ -179,15 +187,27 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
     if (context.state.features.support_shader_interlock)
         // we must always store the depth stencil
         force_store = true;
-    context.current_render_pass = context.state.pipeline_cache.retrieve_render_pass(vk_format, force_load, force_store, color_surface_fin == nullptr);
+
+    bool depth_load = force_load;
+    bool stencil_load = force_load;
+    if (ds_surface_fin != nullptr) {
+        constexpr bool use_ds_depth_validity = true;
+        const bool game_stores = context.record.depth_stencil_surface.force_store;
+        const bool depth_content_valid = state.surface_cache.begin_ds_scene_depth_check(*ds_surface_fin, game_stores, context.record.color_surface.data.address());
+        if (use_ds_depth_validity && game_stores && !depth_content_valid)
+            depth_load = false;
+    }
+    context.current_render_pass = context.state.pipeline_cache.retrieve_render_pass(vk_format, depth_load, stencil_load, force_store, color_surface_fin == nullptr);
     if (context.state.features.support_shader_interlock)
         // also retrieve / create the shader interlock pass
-        context.current_shader_interlock_pass = context.state.pipeline_cache.retrieve_render_pass(vk_format, true, true, color_surface_fin == nullptr, true);
+        context.current_shader_interlock_pass = context.state.pipeline_cache.retrieve_render_pass(vk_format, true, true, true, color_surface_fin == nullptr, true);
 
     Framebuffer &framebuffer = state.surface_cache.retrieve_framebuffer_handle(mem, color_surface_fin, ds_surface_fin, context.current_render_pass, context.current_shader_interlock_pass, context.current_color_view, context.current_ds_view);
     context.current_framebuffer = framebuffer.standard;
     context.current_shader_interlock_framebuffer = framebuffer.shader_interlock;
     context.current_color_base_image = framebuffer.base_image;
+    context.current_fb_width = framebuffer.width;
+    context.current_fb_height = framebuffer.height;
 
     // make sure we are not keeping any texture from the previous pass
     // (textures can be still bound even though they are not used)
@@ -343,6 +363,13 @@ void VKContext::start_render_pass(bool create_descriptor_set) {
             .offset = { 0, 0 },
             .extent = { render_target->width, render_target->height }
         };
+    }
+
+    if (current_fb_width != 0) {
+        const uint32_t max_w = current_fb_width - std::min<uint32_t>(current_fb_width, static_cast<uint32_t>(curr_renderpass_info.renderArea.offset.x));
+        const uint32_t max_h = current_fb_height - std::min<uint32_t>(current_fb_height, static_cast<uint32_t>(curr_renderpass_info.renderArea.offset.y));
+        curr_renderpass_info.renderArea.extent.width = std::min(curr_renderpass_info.renderArea.extent.width, max_w);
+        curr_renderpass_info.renderArea.extent.height = std::min(curr_renderpass_info.renderArea.extent.height, max_h);
     }
 
     // only the depth-stencil attachment may be clear if not force loaded
@@ -521,7 +548,7 @@ void VKContext::check_for_macroblock_change(bool is_draw) {
         // TODO: with the feedback loop extension we can do better
         ignore_macroblock = true;
         // in this case we must load and store the depth stencil each time
-        current_render_pass = state.pipeline_cache.retrieve_render_pass(current_color_format, true, true, !record.color_surface.data);
+        current_render_pass = state.pipeline_cache.retrieve_render_pass(current_color_format, true, true, true, !record.color_surface.data);
     }
 
     // use the scissor to know in which macroblock we are
@@ -532,6 +559,9 @@ void VKContext::check_for_macroblock_change(bool is_draw) {
         // we changed the current macroblock, restart the renderpass
         last_macroblock_x = curr_macroblock_x;
         last_macroblock_y = curr_macroblock_y;
+
+        // the finished block's content is now visible to samples within this scene
+        scene_macroblock_flushed = true;
 
         if (in_renderpass) {
             if (state.features.use_texture_viewport) {

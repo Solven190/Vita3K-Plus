@@ -23,12 +23,14 @@
 #include <util/containers.h>
 #include <vkutil/objects.h>
 
+#include <functional>
 #include <optional>
 
 struct SwsContext;
 
 namespace renderer::vulkan {
 
+struct VKContext;
 struct VKRenderTarget;
 struct VKState;
 struct Viewport;
@@ -60,6 +62,9 @@ struct Framebuffer {
     vk::Framebuffer shader_interlock;
     // base color image used by the framebuffer
     vkutil::Image *base_image;
+    // framebuffer dimensions — the render area must never exceed them
+    uint32_t width;
+    uint32_t height;
 };
 
 struct CastedTexture {
@@ -83,6 +88,7 @@ struct ColorSurfaceCacheInfo : public SurfaceCacheInfo {
     uint16_t original_height;
     uint32_t stride_bytes;
     uint64_t last_frame_rendered;
+    uint64_t last_scene_rendered = 0;
 
     SceGxmColorBaseFormat format;
     vk::ComponentMapping swizzle;
@@ -149,6 +155,9 @@ struct DepthStencilSurfaceCacheInfo : public SurfaceCacheInfo {
     uint32_t stride_samples;
     SceGxmMultisampleMode multisample_mode;
 
+    bool depth_content_stored = true;
+    Address last_scene_color_addr = 0;
+
     // used when reading from this depth stencil in a shader with texture viewport enabled
     vk::ImageView depth_view = nullptr;
     vk::ImageView stencil_view = nullptr;
@@ -207,6 +216,18 @@ private:
     VKRenderTarget *target = nullptr;
     ColorSurfaceCacheInfo *last_written_surface = nullptr;
 
+    DepthStencilSurfaceCacheInfo *pending_ds_scene = nullptr;
+    bool pending_ds_scene_stores = false;
+
+    struct PendingCast {
+        vk::ImageView view;
+        ColorSurfaceCacheInfo *info;
+        std::function<void(vk::CommandBuffer)> record;
+    };
+    std::vector<PendingCast> pending_casts;
+
+    void record_pending_cast(PendingCast &cast, VKContext &context);
+
     // destroy all framebuffers using view as their color or depth-stencil
     void destroy_framebuffers(vk::ImageView view);
 
@@ -236,7 +257,9 @@ private:
     // [sync_addr, sync_addr + sync_size) is written to guest RAM: a surface's address range
     // can be a memory pool that also holds CPU-written data (e.g. transfer destinations),
     // which a full-range write-back would clobber with stale image content.
-    void submit_immediate_surface_sync(ColorSurfaceCacheInfo &surface, MemState *mem, Address sync_addr = 0, uint32_t sync_size = 0);public:
+    void submit_immediate_surface_sync(ColorSurfaceCacheInfo &surface, MemState *mem, Address sync_addr = 0, uint32_t sync_size = 0);
+
+public:
     // when creating a mutable image, can we pass as an argument
     // the possible format used for an image view to improve performance ?
     bool support_image_format_specifier = false;
@@ -253,6 +276,12 @@ private:
     std::optional<TextureLookupResult> retrieve_color_surface_as_texture(const SceGxmTexture &texture, const SceGxmColorBaseFormat base_format, TextureViewport *texture_viewport);
 
     SurfaceRetrieveResult retrieve_depth_stencil_for_framebuffer(SceGxmDepthStencilSurface *depth_stencil, const uint32_t width, const uint32_t height);
+
+    bool begin_ds_scene_depth_check(const SceGxmDepthStencilSurface &depth_stencil, bool this_scene_stores, Address scene_color_addr);
+    void resolve_ds_scene_end(bool scene_wrote_depth);
+    void perform_pending_casts(VKContext &context, uint16_t vert_texture_count, uint16_t frag_texture_count);
+    void flush_all_pending_casts();
+
     std::optional<TextureLookupResult> retrieve_depth_stencil_as_texture(const SceGxmTexture &texture, TextureViewport *texture_viewport);
 
     Framebuffer &retrieve_framebuffer_handle(MemState &mem, SceGxmColorSurface *color, SceGxmDepthStencilSurface *depth_stencil,
