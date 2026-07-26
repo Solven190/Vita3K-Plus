@@ -1761,6 +1761,11 @@ SceSize msgpipe_recv(KernelState &kernel, const char *export_name, SceUID thread
                 }
                 msgpipe_lock.lock(); // Lock message pipe again
                 availableSize = msgpipe->data_buffer.Used();
+                if (!((availableSize >= recvSize) || (ASAP && (availableSize > 0)))) {
+                    if (msgpipe->receivers->find(thread) == msgpipe->receivers->end())
+                        msgpipe->receivers->push(wait_data);
+                    thread->update_status(ThreadStatus::wait, ThreadStatus::run);
+                }
             } while (!((availableSize >= recvSize) || (ASAP && (availableSize > 0))));
 
             return finish();
@@ -1868,6 +1873,11 @@ SceSize msgpipe_send(KernelState &kernel, const char *export_name, SceUID thread
                 }
                 msgpipe_lock.lock(); // Lock message pipe before read from data_buffer
                 freeSize = msgpipe->data_buffer.Free();
+                if (!((freeSize >= sendSize) || (ASAP && (freeSize >= 1)))) {
+                    if (msgpipe->senders->find(thread) == msgpipe->senders->end())
+                        msgpipe->senders->push(wait_data);
+                    thread->update_status(ThreadStatus::wait, ThreadStatus::run);
+                }
             } while (!((freeSize >= sendSize) || (ASAP && (freeSize >= 1))));
 
             // Message pipe is still locked here, so we can read from data_buffer in finish()
