@@ -362,6 +362,36 @@ static spv::Id create_builtin_sampler_for_raw(spv::Builder &b, const FeatureStat
     return sampler;
 }
 
+// exact piecewise sRGB encode of a vec3: storage-image writes bypass the automatic
+// conversion, and the display/sampler side decodes with the exact curve — a pow(1/2.2)
+// approximation visibly lifts the darks (at 0.01 linear the error is about +35%)
+static spv::Id srgb_encode_rgb(spv::Builder &b, utils::SpirvUtilFunctions &utils, spv::Id rgb) {
+    const spv::Id f32 = b.makeFloatType(32);
+    const spv::Id v3 = b.makeVectorType(f32, 3);
+    const spv::Id bv3 = b.makeVectorType(b.makeBoolType(), 3);
+
+    const spv::Id lo = b.createBinOp(spv::OpVectorTimesScalar, v3, rgb, b.makeFloatConstant(12.92f));
+    spv::Id hi = b.createBuiltinCall(v3, utils.std_builtins, GLSLstd450Pow, { rgb, utils::make_uniform_vector_from_type(b, v3, 1.0f / 2.4f) });
+    hi = b.createBinOp(spv::OpVectorTimesScalar, v3, hi, b.makeFloatConstant(1.055f));
+    hi = b.createBinOp(spv::OpFSub, v3, hi, utils::make_uniform_vector_from_type(b, v3, 0.055f));
+    const spv::Id cond = b.createBinOp(spv::OpFOrdLessThanEqual, bv3, rgb, utils::make_uniform_vector_from_type(b, v3, 0.0031308f));
+    return b.createTriOp(spv::OpSelect, v3, cond, lo, hi);
+}
+
+// exact piecewise sRGB decode of a vec3 (inverse of the above, for storage-image reads)
+static spv::Id srgb_decode_rgb(spv::Builder &b, utils::SpirvUtilFunctions &utils, spv::Id rgb) {
+    const spv::Id f32 = b.makeFloatType(32);
+    const spv::Id v3 = b.makeVectorType(f32, 3);
+    const spv::Id bv3 = b.makeVectorType(b.makeBoolType(), 3);
+
+    const spv::Id lo = b.createBinOp(spv::OpVectorTimesScalar, v3, rgb, b.makeFloatConstant(1.0f / 12.92f));
+    spv::Id hi = b.createBinOp(spv::OpFAdd, v3, rgb, utils::make_uniform_vector_from_type(b, v3, 0.055f));
+    hi = b.createBinOp(spv::OpVectorTimesScalar, v3, hi, b.makeFloatConstant(1.0f / 1.055f));
+    hi = b.createBuiltinCall(v3, utils.std_builtins, GLSLstd450Pow, { hi, utils::make_uniform_vector_from_type(b, v3, 2.4f) });
+    const spv::Id cond = b.createBinOp(spv::OpFOrdLessThanEqual, bv3, rgb, utils::make_uniform_vector_from_type(b, v3, 0.04045f));
+    return b.createTriOp(spv::OpSelect, v3, cond, lo, hi);
+}
+
 static void create_fragment_inputs(spv::Builder &b, SpirvShaderParameters &parameters, utils::SpirvUtilFunctions &utils, const FeatureState &features, TranslationState &translation_state, NonDependentTextureQueryCallInfos &tex_query_infos, SamplerMap &samplers,
     const SceGxmProgram &program) {
     static const std::unordered_map<std::uint32_t, std::pair<std::string, std::uint32_t>> name_map = {
@@ -777,11 +807,34 @@ static void create_fragment_inputs(spv::Builder &b, SpirvShaderParameters &param
                 }
                 translation_state.color_attachment_raw_id = color_attachment_raw;
 
-                spv::Id load_normal_cond = b.createBinOp(spv::OpFOrdLessThan, b.makeBoolType(), utils::create_access_chain(b, spv::StorageClassPrivate, translation_state.render_info_id, { b.makeIntConstant(FRAG_UNIFORM_use_raw_image) }), b.makeFloatConstant(0.5f));
+                spv::Id load_normal_ptr = utils::create_access_chain(b, spv::StorageClassUniform, translation_state.render_info_id, { b.makeIntConstant(FRAG_UNIFORM_use_raw_image) });
+                spv::Id load_normal_cond = b.createBinOp(spv::OpFOrdLessThan, b.makeBoolType(), b.createLoad(load_normal_ptr, spv::NoPrecision), b.makeFloatConstant(0.5f));
                 spv::Builder::If cond_builder(load_normal_cond, spv::SelectionControlMaskNone, b);
 
                 source = b.createOp(spv::OpImageRead, v4, { b.createLoad(color_attachment, spv::NoPrecision), current_coord });
-                store_source_result();
+
+                if (translation_state.is_vulkan) {
+                    // storage-image reads bypass the automatic sRGB decoding: linearize
+                    // manually when the surface is gamma-corrected, like the write side does
+                    // (otherwise every programmable-blending cycle gamma-pumps towards white)
+                    const spv::Id old_source = source;
+                    spv::Builder::If srgb_cond_builder(parameters.is_srgb_constant, spv::SelectionControlMaskNone, b);
+
+                    const spv::Id f32 = b.makeFloatType(32);
+                    const spv::Id v3 = b.makeVectorType(f32, 3);
+                    spv::Id rgb = b.createOp(spv::OpVectorShuffle, v3, { { true, source }, { true, source }, { false, 0 }, { false, 1 }, { false, 2 } });
+                    rgb = srgb_decode_rgb(b, utils, rgb);
+                    source = b.createOp(spv::OpVectorShuffle, v4, { { true, rgb }, { true, source }, { false, 0 }, { false, 1 }, { false, 2 }, { false, 6 } });
+                    store_source_result();
+
+                    srgb_cond_builder.makeBeginElse();
+                    source = old_source;
+                    store_source_result();
+                    srgb_cond_builder.makeEndIf();
+                } else {
+                    store_source_result();
+                }
+
                 cond_builder.makeBeginElse();
                 color_attachment = color_attachment_raw;
                 source = b.createOp(spv::OpImageRead, uiv4, { b.createLoad(color_attachment, spv::NoPrecision), current_coord });
@@ -800,12 +853,10 @@ static void create_fragment_inputs(spv::Builder &b, SpirvShaderParameters &param
                     // if (is_srgb)
                     spv::Builder::If cond_builder(parameters.is_srgb_constant, spv::SelectionControlMaskNone, b);
 
-                    // perform gamma correction:
-                    // source.xyz = pow(source.xyz, vec3(2.2));
+                    // perform the exact sRGB decoding (storage-image reads bypass the automatic one)
                     const spv::Id v3 = b.makeVectorType(f32, 3);
                     spv::Id rgb = b.createOp(spv::OpVectorShuffle, v3, { { true, source }, { true, source }, { false, 0 }, { false, 1 }, { false, 2 } });
-                    const spv::Id gamma = utils::make_uniform_vector_from_type(b, v3, 2.2f);
-                    rgb = b.createBuiltinCall(v3, utils.std_builtins, GLSLstd450Pow, { rgb, gamma });
+                    rgb = srgb_decode_rgb(b, utils, rgb);
                     b.setPrecision(rgb, precision);
                     source = b.createOp(spv::OpVectorShuffle, v4, { { true, rgb }, { true, source }, { false, 0 }, { false, 1 }, { false, 2 }, { false, 6 } });
 
@@ -1505,14 +1556,12 @@ static spv::Function *make_frag_finalize_function(spv::Builder &b, const SpirvSh
             // if (is_srgb)
             spv::Builder::If cond_builder(parameters.is_srgb_constant, spv::SelectionControlMaskNone, b);
 
-            // perform inverse gamma correction:
-            // color.xyz = pow(color.xyz, vec3(1/2.2));
+            // perform the exact sRGB encoding (the storage-image write bypasses the automatic one)
             const spv::Id f32 = b.makeFloatType(32);
             const spv::Id v4 = b.makeVectorType(f32, 4);
             const spv::Id v3 = b.makeVectorType(f32, 3);
             spv::Id rgb = b.createOp(spv::OpVectorShuffle, v3, { { true, color }, { true, color }, { false, 0 }, { false, 1 }, { false, 2 } });
-            const spv::Id gamma = utils::make_uniform_vector_from_type(b, v3, 1 / 2.2f);
-            rgb = b.createBuiltinCall(v3, utils.std_builtins, GLSLstd450Pow, { rgb, gamma });
+            rgb = srgb_encode_rgb(b, utils, rgb);
             color = b.createOp(spv::OpVectorShuffle, v4, { { true, rgb }, { true, color }, { false, 0 }, { false, 1 }, { false, 2 }, { false, 6 } });
 
             b.createNoResultOp(spv::OpImageWrite, { b.createLoad(translate_state.color_attachment_id, spv::NoPrecision), translated_id, color });
@@ -1526,10 +1575,16 @@ static spv::Function *make_frag_finalize_function(spv::Builder &b, const SpirvSh
         }
 
         if (features.preserve_f16_nan_as_u16) {
+            spv::Id use_raw_ptr = utils::create_access_chain(b, spv::StorageClassUniform, translate_state.render_info_id, { b.makeIntConstant(FRAG_UNIFORM_use_raw_image) });
+            spv::Id use_raw_cond = b.createBinOp(spv::OpFOrdGreaterThan, b.makeBoolType(), b.createLoad(use_raw_ptr, spv::NoPrecision), b.makeFloatConstant(0.5f));
+            spv::Builder::If raw_cond_builder(use_raw_cond, spv::SelectionControlMaskNone, b);
+
             color_val_operand.type = DataType::UINT16;
             color = utils::load(b, parameters, utils, features, color_val_operand, 0xF, reg_off);
 
             b.createNoResultOp(spv::OpImageWrite, { b.createLoad(translate_state.color_attachment_raw_id, spv::NoPrecision), translated_id, color });
+
+            raw_cond_builder.makeEndIf();
         }
     } else {
         spv::Id out = b.createVariable(precision, spv::StorageClassOutput, b.makeVectorType(b.makeFloatType(32), 4), "out_color");

@@ -65,6 +65,7 @@ struct Framebuffer {
     // framebuffer dimensions — the render area must never exceed them
     uint32_t width;
     uint32_t height;
+    vkutil::Image *raw_image = nullptr;
 };
 
 struct CastedTexture {
@@ -73,6 +74,8 @@ struct CastedTexture {
     vkutil::Buffer transition_buffer;
     // storage view of the texture, used as the compute de-interleave output
     vk::ImageView reinterpret_view = nullptr;
+    // view with the opposite gamma to the image's format (UNORM base <-> sRGB view)
+    vk::ImageView alt_gamma_view = nullptr;
     uint64_t scene_timestamp = 0;
     uint32_t cropped_x = 0;
     uint32_t cropped_y = 0;
@@ -106,6 +109,13 @@ struct ColorSurfaceCacheInfo : public SurfaceCacheInfo {
 
     // only used when upscaling is enabled, to downscale the image first
     std::unique_ptr<vkutil::Image> blit_image;
+
+    // parallel R16G16B16A16Uint image written by fragment shaders alongside the float image
+    std::unique_ptr<vkutil::Image> raw_image;
+    // whether any blending draw rendered into this surface
+    bool content_is_blended = false;
+    // which image the cached reinterpret_store_view was created on (it must follow the choice)
+    bool reinterpret_view_is_raw = false;
 
     // only used for 3-component rgb textures which can't be copied directly
     std::unique_ptr<vkutil::Buffer> copy_buffer;
@@ -177,6 +187,7 @@ struct TextureLookupResult {
 struct SurfaceRetrieveResult {
     vk::ImageView view;
     vkutil::Image *base_image;
+    vkutil::Image *raw_image = nullptr;
 };
 
 // for use with the surface_cast_reinterpret shader
@@ -221,6 +232,7 @@ private:
 
     struct PendingCast {
         vk::ImageView view;
+        vk::ImageView alt_view;
         ColorSurfaceCacheInfo *info;
         std::function<void(vk::CommandBuffer)> record;
     };
@@ -281,6 +293,11 @@ public:
     void resolve_ds_scene_end(bool scene_wrote_depth);
     void perform_pending_casts(VKContext &context, uint16_t vert_texture_count, uint16_t frag_texture_count);
     void flush_all_pending_casts();
+
+    void mark_current_surface_blended() {
+        if (last_written_surface)
+            last_written_surface->content_is_blended = true;
+    }
 
     std::optional<TextureLookupResult> retrieve_depth_stencil_as_texture(const SceGxmTexture &texture, TextureViewport *texture_viewport);
 

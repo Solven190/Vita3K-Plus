@@ -21,8 +21,8 @@
 #include <renderer/texture_cache.h>
 
 #include <gxm/functions.h>
-#include <mem/ptr.h>
 #include <mem/functions.h>
+#include <mem/ptr.h>
 #include <util/align.h>
 #include <util/log.h>
 

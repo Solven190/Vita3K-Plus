@@ -197,7 +197,8 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
         if (use_ds_depth_validity && game_stores && !depth_content_valid)
             depth_load = false;
     }
-    context.current_render_pass = context.state.pipeline_cache.retrieve_render_pass(vk_format, depth_load, stencil_load, force_store, color_surface_fin == nullptr);
+    const bool color_has_raw = context.record.color_base_format == SCE_GXM_COLOR_BASE_FORMAT_F16F16F16F16;
+    context.current_render_pass = context.state.pipeline_cache.retrieve_render_pass(vk_format, depth_load, stencil_load, force_store, color_surface_fin == nullptr, false, color_has_raw);
     if (context.state.features.support_shader_interlock)
         // also retrieve / create the shader interlock pass
         context.current_shader_interlock_pass = context.state.pipeline_cache.retrieve_render_pass(vk_format, true, true, true, color_surface_fin == nullptr, true);
@@ -208,6 +209,7 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
     context.current_color_base_image = framebuffer.base_image;
     context.current_fb_width = framebuffer.width;
     context.current_fb_height = framebuffer.height;
+    context.current_color_raw_view = framebuffer.raw_image ? framebuffer.raw_image->view : state.default_raw_image.view;
 
     // make sure we are not keeping any texture from the previous pass
     // (textures can be still bound even though they are not used)
@@ -301,16 +303,23 @@ static vk::DescriptorSet retrieve_color_descriptor(VKState &state, FrameDescript
         return frame_descriptor.sets[frame_descriptor.descriptors_idx++];
 
     // we have no more frame descriptor available, create a bunch of new one for this specific layout
-    // the type depends on the way we read it
-    vk::DescriptorPoolSize pool_size{
-        .type = state.features.support_shader_interlock ? vk::DescriptorType::eStorageImage : vk::DescriptorType::eInputAttachment,
-        .descriptorCount = DESCRIPTOR_PACK_SIZE * MAX_FRAMES_RENDERING
-    };
+    // the type depends on the way we read it; each set holds the color attachment (binding 0)
+    uint32_t storage_images_per_set = state.features.support_shader_interlock ? 1 : 0;
+    if (state.features.use_mask_bit)
+        storage_images_per_set++;
+    if (state.features.preserve_f16_nan_as_u16)
+        storage_images_per_set++;
+
+    std::vector<vk::DescriptorPoolSize> pool_sizes;
+    if (!state.features.support_shader_interlock)
+        pool_sizes.push_back({ vk::DescriptorType::eInputAttachment, DESCRIPTOR_PACK_SIZE * MAX_FRAMES_RENDERING });
+    if (storage_images_per_set > 0)
+        pool_sizes.push_back({ vk::DescriptorType::eStorageImage, storage_images_per_set * DESCRIPTOR_PACK_SIZE * MAX_FRAMES_RENDERING });
 
     vk::DescriptorPoolCreateInfo descriptor_pool_info{
         .maxSets = DESCRIPTOR_PACK_SIZE * MAX_FRAMES_RENDERING
     };
-    descriptor_pool_info.setPoolSizes(pool_size);
+    descriptor_pool_info.setPoolSizes(pool_sizes);
 
     vk::DescriptorPool descriptor_pool = state.device.createDescriptorPool(descriptor_pool_info);
     state.frame_descriptor_pools.push_back(descriptor_pool);
@@ -372,12 +381,14 @@ void VKContext::start_render_pass(bool create_descriptor_set) {
         curr_renderpass_info.renderArea.extent.height = std::min(curr_renderpass_info.renderArea.extent.height, max_h);
     }
 
-    // only the depth-stencil attachment may be clear if not force loaded
-    std::array<vk::ClearValue, 2> curr_clear_values{};
-    curr_clear_values[1].depthStencil = vk::ClearDepthStencilValue{
+    // only the depth-stencil attachment may be clear if not force loaded. It can sit at attachment index 1 or 2 (raw u16 attachment present) so provide the value at both
+    std::array<vk::ClearValue, 3> curr_clear_values{};
+    const vk::ClearDepthStencilValue ds_clear{
         .depth = record.depth_stencil_surface.background_depth,
         .stencil = record.depth_stencil_surface.stencil
     };
+    curr_clear_values[1].depthStencil = ds_clear;
+    curr_clear_values[2].depthStencil = ds_clear;
     curr_renderpass_info.setClearValues(curr_clear_values);
     render_cmd.beginRenderPass(curr_renderpass_info, vk::SubpassContents::eInline);
 
@@ -410,7 +421,25 @@ void VKContext::start_render_pass(bool create_descriptor_set) {
         .descriptorType = input_type,
     };
     write_descr.setImageInfo(descr_color_info);
-    state.device.updateDescriptorSets(write_descr, {});
+
+    if (state.features.preserve_f16_nan_as_u16) {
+        vk::DescriptorImageInfo descr_raw_info{
+            .sampler = nullptr,
+            .imageView = current_color_raw_view ? current_color_raw_view : state.default_raw_image.view,
+            .imageLayout = vk::ImageLayout::eGeneral,
+        };
+        vk::WriteDescriptorSet write_raw_descr{
+            .dstSet = rendertarget_set,
+            .dstBinding = 2,
+            .dstArrayElement = 0,
+            .descriptorType = vk::DescriptorType::eStorageImage,
+        };
+        write_raw_descr.setImageInfo(descr_raw_info);
+        std::array<vk::WriteDescriptorSet, 2> writes = { write_descr, write_raw_descr };
+        state.device.updateDescriptorSets(writes, {});
+    } else {
+        state.device.updateDescriptorSets(write_descr, {});
+    }
 }
 
 void VKContext::stop_render_pass() {
@@ -548,7 +577,7 @@ void VKContext::check_for_macroblock_change(bool is_draw) {
         // TODO: with the feedback loop extension we can do better
         ignore_macroblock = true;
         // in this case we must load and store the depth stencil each time
-        current_render_pass = state.pipeline_cache.retrieve_render_pass(current_color_format, true, true, true, !record.color_surface.data);
+        current_render_pass = state.pipeline_cache.retrieve_render_pass(current_color_format, true, true, true, !record.color_surface.data, false, record.color_base_format == SCE_GXM_COLOR_BASE_FORMAT_F16F16F16F16);
     }
 
     // use the scissor to know in which macroblock we are

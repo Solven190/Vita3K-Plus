@@ -231,6 +231,15 @@ struct VKContext : public renderer::Context {
     uint64_t scene_timestamp = 1;
     std::vector<vk::CommandBuffer> cmdbuffers_to_submit = {};
 
+    bool scene_wrote_depth = false;
+    bool scene_has_drawn = false;
+    bool scene_macroblock_flushed = false;
+
+    uint32_t current_fb_width = 0;
+    uint32_t current_fb_height = 0;
+
+    vk::ImageView current_color_raw_view = nullptr;
+
     vkutil::HostRingBuffer vertex_stream_ring_buffer;
     vkutil::HostRingBuffer index_stream_ring_buffer;
     vkutil::HostRingBuffer vertex_uniform_stream_ring_buffer;

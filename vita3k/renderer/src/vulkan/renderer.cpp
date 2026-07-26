@@ -610,6 +610,7 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
 
         // use these features (because they are used by the vita GPU) if they are available
         vk::PhysicalDeviceFeatures enabled_features{
+            .independentBlend = physical_device_features.independentBlend,
             .fillModeNonSolid = physical_device_features.fillModeNonSolid,
             .wideLines = physical_device_features.wideLines,
             .samplerAnisotropy = physical_device_features.samplerAnisotropy,
@@ -756,6 +757,8 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
             features.support_shader_interlock = support_shader_interlock;
         }
 
+        features.preserve_f16_nan_as_u16 = features.support_shader_interlock && static_cast<bool>(physical_device_features.independentBlend);
+
         vk::StructureChain<vk::DeviceCreateInfo,
             vk::PhysicalDeviceBufferDeviceAddressFeatures,
             vk::PhysicalDeviceUniformBufferStandardLayoutFeatures,
@@ -877,6 +880,11 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
         };
         cmd_buffer.clearColorImage(default_image.image, vk::ImageLayout::eTransferDstOptimal, white, vkutil::color_subresource_range);
         default_image.transition_to(cmd_buffer, vkutil::ImageLayout::StorageImage);
+
+        // dummy raw u16 storage image, bound at the raw-color slot when the current surface has no raw alias
+        default_raw_image = vkutil::Image(1, 1, vk::Format::eR16G16B16A16Uint);
+        default_raw_image.init_image(vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferDst);
+        default_raw_image.transition_to(cmd_buffer, vkutil::ImageLayout::StorageImage);
         vkutil::end_single_time_command(device, general_queue, general_command_pool, cmd_buffer);
 
         // create the default sampler
