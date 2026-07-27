@@ -93,6 +93,7 @@ struct ThreadState {
     void exit_delete(bool exit = true);
 
     void update_status(ThreadStatus status, std::optional<ThreadStatus> expected = std::nullopt);
+    bool is_delete_requested() const { return delete_requested; }
     Address stack_top() const;
 
     void run_loop();

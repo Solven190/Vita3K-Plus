@@ -1762,6 +1762,12 @@ SceSize msgpipe_recv(KernelState &kernel, const char *export_name, SceUID thread
                 msgpipe_lock.lock(); // Lock message pipe again
                 availableSize = msgpipe->data_buffer.Used();
                 if (!((availableSize >= recvSize) || (ASAP && (availableSize > 0)))) {
+                    if (thread->is_delete_requested()) {
+                        auto it = msgpipe->receivers->find(thread);
+                        if (it != msgpipe->receivers->end())
+                            msgpipe->receivers->erase(it);
+                        return 0;
+                    }
                     if (msgpipe->receivers->find(thread) == msgpipe->receivers->end())
                         msgpipe->receivers->push(wait_data);
                     thread->update_status(ThreadStatus::wait, ThreadStatus::run);
@@ -1874,6 +1880,12 @@ SceSize msgpipe_send(KernelState &kernel, const char *export_name, SceUID thread
                 msgpipe_lock.lock(); // Lock message pipe before read from data_buffer
                 freeSize = msgpipe->data_buffer.Free();
                 if (!((freeSize >= sendSize) || (ASAP && (freeSize >= 1)))) {
+                    if (thread->is_delete_requested()) {
+                        auto it = msgpipe->senders->find(thread);
+                        if (it != msgpipe->senders->end())
+                            msgpipe->senders->erase(it);
+                        return 0;
+                    }
                     if (msgpipe->senders->find(thread) == msgpipe->senders->end())
                         msgpipe->senders->push(wait_data);
                     thread->update_status(ThreadStatus::wait, ThreadStatus::run);

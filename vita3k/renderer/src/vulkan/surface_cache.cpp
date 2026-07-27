@@ -1682,7 +1682,9 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
     VKContext *context = reinterpret_cast<VKContext *>(state.context);
     vk::CommandBuffer cmd_buffer = context->render_cmd;
 
-    vk::Image image_to_copy = last_written_surface->texture.image;
+    const bool sync_from_raw = last_written_surface->raw_image && !last_written_surface->content_is_blended;
+    vk::Image image_to_copy = sync_from_raw ? last_written_surface->raw_image->image : last_written_surface->texture.image;
+    const vk::Format sync_format = sync_from_raw ? vk::Format::eR16G16B16A16Uint : last_written_surface->texture.format;
     vk::ImageLayout image_layout = vk::ImageLayout::eGeneral;
 
     // this works for surface swizzles
@@ -1701,8 +1703,13 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
 
         vkutil::Image &blit_image = *last_written_surface->blit_image;
 
+        if (blit_image.image && blit_image.format != sync_format) {
+            state.frame().destroy_queue.add_image(blit_image);
+            blit_image = vkutil::Image();
+        }
+
         if (!blit_image.image) {
-            blit_image.format = last_written_surface->texture.format;
+            blit_image.format = sync_format;
             blit_image.width = last_written_surface->original_width;
             blit_image.height = last_written_surface->original_height;
 
