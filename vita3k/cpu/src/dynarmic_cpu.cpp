@@ -26,10 +26,51 @@
 #include <dynarmic/interface/A32/coprocessor.h>
 #include <dynarmic/interface/exclusive_monitor.h>
 
+#include <atomic>
 #include <bit>
+#include <chrono>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
+
+static std::uint64_t coproc_noop(void *, std::uint32_t, std::uint32_t) {
+    return 0;
+}
+
+static Dynarmic::A32::Coprocessor::Callback coproc_noop_callback() {
+    return Dynarmic::A32::Coprocessor::Callback{ &coproc_noop, std::nullopt };
+}
+
+// Registered for every coprocessor slot Vita3K does not emulate.
+class ArmDynarmicNullCP : public Dynarmic::A32::Coprocessor {
+public:
+    using CoprocReg = Dynarmic::A32::CoprocReg;
+
+    ~ArmDynarmicNullCP() override = default;
+
+    std::optional<Callback> CompileInternalOperation(bool, unsigned, CoprocReg, CoprocReg, CoprocReg, unsigned) override {
+        return coproc_noop_callback();
+    }
+    CallbackOrAccessOneWord CompileSendOneWord(bool, unsigned, CoprocReg, CoprocReg, unsigned) override {
+        return coproc_noop_callback();
+    }
+    CallbackOrAccessTwoWords CompileSendTwoWords(bool, unsigned, CoprocReg) override {
+        return coproc_noop_callback();
+    }
+    CallbackOrAccessOneWord CompileGetOneWord(bool, unsigned, CoprocReg, CoprocReg, unsigned) override {
+        return coproc_noop_callback();
+    }
+    CallbackOrAccessTwoWords CompileGetTwoWords(bool, unsigned, CoprocReg) override {
+        return coproc_noop_callback();
+    }
+    std::optional<Callback> CompileLoadWords(bool, bool, CoprocReg, std::optional<std::uint8_t>) override {
+        return coproc_noop_callback();
+    }
+    std::optional<Callback> CompileStoreWords(bool, bool, CoprocReg, std::optional<std::uint8_t>) override {
+        return coproc_noop_callback();
+    }
+};
 
 class ArmDynarmicCP15 : public Dynarmic::A32::Coprocessor {
     uint32_t tpidruro;
@@ -50,7 +91,7 @@ public:
     std::optional<Callback> CompileInternalOperation(bool two, unsigned opc1, CoprocReg CRd,
         CoprocReg CRn, CoprocReg CRm,
         unsigned opc2) override {
-        return std::nullopt;
+        return coproc_noop_callback();
     }
 
     CallbackOrAccessOneWord CompileSendOneWord(bool two, unsigned opc1, CoprocReg CRn,
@@ -71,11 +112,11 @@ public:
         }
 
         LOG_WARN("Unhandled CP15 MCR: two={} opc1={} CRn={} CRm={} opc2={}", two, opc1, (int)CRn, (int)CRm, opc2);
-        return CallbackOrAccessOneWord{};
+        return coproc_noop_callback();
     }
 
     CallbackOrAccessTwoWords CompileSendTwoWords(bool two, unsigned opc, CoprocReg CRm) override {
-        return CallbackOrAccessTwoWords{};
+        return coproc_noop_callback();
     }
 
     CallbackOrAccessOneWord CompileGetOneWord(bool two, unsigned opc1, CoprocReg CRn, CoprocReg CRm,
@@ -96,21 +137,21 @@ public:
         }
 
         LOG_WARN("Unhandled CP15 MRC: two={} opc1={} CRn={} CRm={} opc2={}", two, opc1, (int)CRn, (int)CRm, opc2);
-        return CallbackOrAccessOneWord{};
+        return coproc_noop_callback();
     }
 
     CallbackOrAccessTwoWords CompileGetTwoWords(bool two, unsigned opc, CoprocReg CRm) override {
-        return CallbackOrAccessTwoWords{};
+        return coproc_noop_callback();
     }
 
     std::optional<Callback> CompileLoadWords(bool two, bool long_transfer, CoprocReg CRd,
         std::optional<std::uint8_t> option) override {
-        return std::nullopt;
+        return coproc_noop_callback();
     }
 
     std::optional<Callback> CompileStoreWords(bool two, bool long_transfer, CoprocReg CRd,
         std::optional<std::uint8_t> option) override {
-        return std::nullopt;
+        return coproc_noop_callback();
     }
 
     void set_tpidruro(uint32_t tpidruro) {
@@ -138,6 +179,11 @@ public:
     std::optional<std::uint32_t> MemoryReadCode(Dynarmic::A32::VAddr addr) override {
         if (cpu->log_mem)
             LOG_TRACE("Instruction fetch at address 0x{:X}", addr);
+        const Ptr<uint32_t> ptr{ static_cast<Address>(addr) };
+        if (!ptr || !ptr.valid(*parent->mem) || ptr.address() < parent->mem->host_page_size) {
+            LOG_CRITICAL("Invalid instruction fetch at address 0x{:X}\n{}", addr, cpu->save_context().description());
+            return std::nullopt;
+        }
         return MemoryRead32(addr);
     }
 
@@ -153,7 +199,61 @@ public:
         LOG_TRACE("{} ({}): {} {}", log_hex(self_), self.parent->thread_id, log_hex(address), disassembly);
     }
 
+    inline static std::recursive_timed_mutex loader_lock_mutex;
+    inline static std::atomic<int> loader_lock_timeouts{ 0 };
+    int loader_lock_held = 0;
+
+    static void MonoLoaderLockAcquire(uint64_t self_, uint64_t, uint64_t) {
+        ArmDynarmicCallback &self = *reinterpret_cast<ArmDynarmicCallback *>(self_);
+        if (self.loader_lock_held > 0) {
+            ++self.loader_lock_held;
+            return;
+        }
+        if (!loader_lock_mutex.try_lock_for(std::chrono::seconds(5))) {
+            if (loader_lock_timeouts.fetch_add(1) < 20)
+                LOG_WARN("Timed out waiting for the emulated mono loader lock on thread {}, proceeding unserialised", self.parent->thread_id);
+            return;
+        }
+        self.loader_lock_held = 1;
+    }
+
+    static void MonoLoaderLockRelease(uint64_t self_, uint64_t, uint64_t) {
+        ArmDynarmicCallback &self = *reinterpret_cast<ArmDynarmicCallback *>(self_);
+        if (self.loader_lock_held == 0)
+            return;
+        if (--self.loader_lock_held == 0)
+            loader_lock_mutex.unlock();
+    }
+
+    static constexpr Address MONO_LOADER_LOCK = 0x80B67D58;
+    static constexpr Address MONO_LOADER_UNLOCK = 0x80B67D0C;
+
+    bool mono_loader_lock_matches() {
+        static const bool matched = [this] {
+            static constexpr uint32_t signature[] = {
+                0xe92d4010, // push {r4, lr}
+                0xe30602b0, // movw r0, #0x62b0
+                0xe3480060, // movt r0, #0x8060
+                0xe5900000, // ldr  r0, [r0]
+                0xe3500000, // cmp  r0, #0
+                0x0a00000b, // beq  (epilogue: the lock is compiled out)
+            };
+            for (size_t i = 0; i < std::size(signature); i++) {
+                const Ptr<uint32_t> word{ static_cast<Address>(MONO_LOADER_LOCK + i * 4) };
+                if (!word.valid(*parent->mem) || *word.get(*parent->mem) != signature[i])
+                    return false;
+            }
+            LOG_INFO("Serialising mono's loader lock: mono_loader_lock at 0x{:X} acquires no mutex in this build", MONO_LOADER_LOCK);
+            return true;
+        }();
+        return matched;
+    }
+
     void PreCodeTranslationHook(bool is_thumb, Dynarmic::A32::VAddr pc, Dynarmic::A32::IREmitter &ir) override {
+        if ((pc == MONO_LOADER_LOCK || pc == MONO_LOADER_UNLOCK) && mono_loader_lock_matches()) {
+            ir.CallHostFunction(pc == MONO_LOADER_LOCK ? &MonoLoaderLockAcquire : &MonoLoaderLockRelease,
+                ir.Imm64((uint64_t)this), ir.Imm64(0), ir.Imm64(0));
+        }
         if (cpu->log_code) {
             ir.CallHostFunction(&TraceInstruction, ir.Imm64((uint64_t)this), ir.Imm64(pc), ir.Imm64(is_thumb));
         }
@@ -299,21 +399,28 @@ public:
         case Dynarmic::A32::Exception::Yield:
             break;
         case Dynarmic::A32::Exception::UndefinedInstruction:
-            LOG_WARN("Undefined instruction at address 0x{:X}, instruction 0x{:X} ({})", pc, MemoryReadCode(pc).value(), disassemble(*parent, pc, nullptr));
-            InterpreterFallback(pc, 1);
+            LOG_CRITICAL("Halting thread: undefined instruction at address 0x{:X}, instruction 0x{:X} ({})\n{}", pc, MemoryReadCode(pc).value_or(0), disassemble(*parent, pc, nullptr), cpu->save_context().description());
+            cpu->crashed = true;
+            cpu->jit->HaltExecution();
             break;
         case Dynarmic::A32::Exception::UnpredictableInstruction:
-            LOG_WARN("Unpredictable instruction at address 0x{:X}, instruction 0x{:X} ({})", pc, MemoryReadCode(pc).value(), disassemble(*parent, pc, nullptr));
+            LOG_WARN("Unpredictable instruction at address 0x{:X}, instruction 0x{:X} ({})", pc, MemoryReadCode(pc).value_or(0), disassemble(*parent, pc, nullptr));
             InterpreterFallback(pc, 1);
             break;
         case Dynarmic::A32::Exception::DecodeError: {
-            LOG_WARN("Decode error at address 0x{:X}, instruction 0x{:X} ({})", pc, MemoryReadCode(pc).value(), disassemble(*parent, pc, nullptr));
-            InterpreterFallback(pc, 1);
+            LOG_CRITICAL("Halting thread: decode error at address 0x{:X}, instruction 0x{:X} ({})\n{}", pc, MemoryReadCode(pc).value_or(0), disassemble(*parent, pc, nullptr), cpu->save_context().description());
+            cpu->crashed = true;
+            cpu->jit->HaltExecution();
             break;
         }
+        case Dynarmic::A32::Exception::NoExecuteFault:
+            LOG_CRITICAL("Halting thread: attempted to execute unmapped memory at pc = 0x{:X}\n{}", pc, cpu->save_context().description());
+            cpu->crashed = true;
+            cpu->jit->HaltExecution();
+            break;
         default:
             LOG_WARN("Unknown exception {} Raised at pc = 0x{:x}", static_cast<size_t>(exception), pc);
-            LOG_TRACE("at address 0x{:X}, instruction 0x{:X} ({})", pc, MemoryReadCode(pc).value(), disassemble(*parent, pc, nullptr));
+            LOG_TRACE("at address 0x{:X}, instruction 0x{:X} ({})", pc, MemoryReadCode(pc).value_or(0), disassemble(*parent, pc, nullptr));
         }
     }
 
@@ -345,6 +452,11 @@ std::unique_ptr<Dynarmic::A32::Jit> DynarmicCPU::make_jit() {
     config.hook_hint_instructions = true;
     config.global_monitor = &shared_monitor;
     config.coprocessors[15] = cp15;
+    static const std::shared_ptr<ArmDynarmicNullCP> null_cp = std::make_shared<ArmDynarmicNullCP>();
+    for (auto &coproc : config.coprocessors) {
+        if (!coproc)
+            coproc = null_cp;
+    }
     config.processor_id = core_id;
     config.optimizations = cpu_opt ? Dynarmic::all_safe_optimizations : Dynarmic::no_optimizations;
     config.enable_cycle_counting = false;
@@ -366,11 +478,15 @@ DynarmicCPU::~DynarmicCPU() = default;
 int DynarmicCPU::run() {
     halted = false;
     break_ = false;
+    crashed = false;
     parent->svc_called = false;
     Dynarmic::HaltReason halt_reason;
     do {
         halt_reason = jit->Run();
     } while ((halt_reason == Dynarmic::HaltReason::Step) || (halt_reason == Dynarmic::HaltReason::CacheInvalidation));
+
+    if (crashed)
+        return -1;
 
     return halted;
 }

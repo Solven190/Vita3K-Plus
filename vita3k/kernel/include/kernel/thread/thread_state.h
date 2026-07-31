@@ -108,7 +108,9 @@ struct ThreadState {
     uint32_t run_guest_function(Address callback_address, SceSize args = 0, const Ptr<void> argp = Ptr<void>{});
 
     void suspend();
+    void suspend_and_wait();
     void resume(bool step = false);
+    void resume_if_suspended();
     std::string log_stack_traceback() const;
 
 private:
@@ -124,6 +126,8 @@ private:
     bool delete_requested = false;
     // Set by suspend(), consumed in run_loop() to transition to ThreadStatus::suspend.
     bool suspend_requested = false;
+    // Suspended by sceKernelSuspendThreadForVM
+    bool vm_suspended = false;
     // Single stepping mode.
     bool single_stepping = false;
 

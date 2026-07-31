@@ -25,6 +25,7 @@
 #include <util/log.h>
 
 #include <cassert>
+#include <chrono>
 #include <cstring>
 #include <memory>
 #include <sstream>
@@ -284,7 +285,7 @@ void ThreadState::run_loop() {
 
             lock.lock();
 
-            if (do_step || suspend_requested || hit_breakpoint(*cpu)) {
+            if (do_step || suspend_requested || vm_suspended || hit_breakpoint(*cpu)) {
                 suspend_requested = false;
                 update_status(ThreadStatus::suspend);
             }
@@ -435,6 +436,22 @@ void ThreadState::suspend() {
     stop(*cpu);
 }
 
+void ThreadState::suspend_and_wait() {
+    std::unique_lock<std::mutex> lock(mutex);
+    vm_suspended = true;
+
+    if (status != ThreadStatus::run)
+        return;
+
+    suspend_requested = true;
+    lock.unlock();
+    stop(*cpu);
+    lock.lock();
+
+    if (!status_cond.wait_for(lock, std::chrono::seconds(5), [&] { return status != ThreadStatus::run || delete_requested; }))
+        LOG_WARN("Timed out waiting for thread {} ({}) to suspend, context may be stale", name, id);
+}
+
 void ThreadState::resume(bool step) {
     assert(status == ThreadStatus::suspend || status == ThreadStatus::dormant);
     {
@@ -442,6 +459,14 @@ void ThreadState::resume(bool step) {
         single_stepping = step;
         update_status(ThreadStatus::run);
     }
+}
+
+void ThreadState::resume_if_suspended() {
+    const std::lock_guard<std::mutex> lock(mutex);
+    vm_suspended = false;
+    suspend_requested = false;
+    if (status == ThreadStatus::suspend)
+        update_status(ThreadStatus::run);
 }
 
 std::string ThreadState::log_stack_traceback() const {

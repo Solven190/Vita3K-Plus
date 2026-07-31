@@ -40,6 +40,7 @@ class DynarmicCPU : public CPUInterface {
 
     bool halted = false;
     bool break_ = false;
+    bool crashed = false;
 
     bool log_mem = false;
     bool log_code = false;
