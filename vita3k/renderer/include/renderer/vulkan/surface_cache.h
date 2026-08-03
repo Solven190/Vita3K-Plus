@@ -120,6 +120,10 @@ struct ColorSurfaceCacheInfo : public SurfaceCacheInfo {
     // only used for 3-component rgb textures which can't be copied directly
     std::unique_ptr<vkutil::Buffer> copy_buffer;
 
+    // staging buffer used to reload guest memory content into the surface image after the
+    // game wrote the surface's memory with the CPU while the surface sat idle
+    std::unique_ptr<vkutil::Buffer> upload_buffer;
+
     // pointer shared with the memory trap indicating if this surface sync is needed
     std::shared_ptr<bool> need_surface_sync;
 
@@ -245,6 +249,9 @@ private:
 
     void destroy_surface(ColorSurfaceCacheInfo &info);
     void destroy_surface(DepthStencilSurfaceCacheInfo &info);
+
+    // reload a surface's guest-memory content into its Vulkan image (recorded in prerender_cmd)
+    bool try_upload_guest_content(ColorSurfaceCacheInfo &info, MemState &mem);
 
     // compute pipeline that re-groups a typeless byte-reinterpret so the wanted
     // 32-bit half is written coherently at fully upscaled resolution, instead of

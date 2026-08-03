@@ -347,9 +347,10 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     if (!context.in_renderpass)
         context.start_render_pass();
 
-    // when we do multiple render pass for one scene (shader interlock or slow macroblock),
-    // we need to always load the depth-stencil after the first draw
-    if (context.is_first_scene_draw && (context.state.features.support_shader_interlock || context.ignore_macroblock)) {
+    // when the render pass restarts within one scene (shader interlock or slow macroblock
+    // multi-pass, or a mid-scene interruption such as a casted-texture copy), the re-begin
+    // must load the depth-stencil, never re-run the scene-begin clear
+    if (context.is_first_scene_draw && (context.state.features.support_shader_interlock || context.ignore_macroblock || !context.render_target->has_macroblock_sync)) {
         // update the render pass to load and store the depth and stencil
         context.current_render_pass = context.state.pipeline_cache.retrieve_render_pass(context.current_color_format, true, true, true, !context.record.color_surface.data, false,
             context.record.color_base_format == SCE_GXM_COLOR_BASE_FORMAT_F16F16F16F16);

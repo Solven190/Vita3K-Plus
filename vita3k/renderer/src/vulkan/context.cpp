@@ -104,12 +104,24 @@ void VKContext::wait_thread_function(const MemState &mem) {
                            }
                            uint8_t *src = reinterpret_cast<uint8_t *>(std::get<vkutil::Buffer>(mem_it->second.buffer_impl).mapped_data);
                            src += request.location - mem_it->first;
-                           memcpy(Ptr<void>(request.location).get(mem), src, request.size);
+                           renderer::vulkan::surface_sync_internal_write = true;
+                           if (request.row_stride != 0) {
+                               uint8_t *dst = reinterpret_cast<uint8_t *>(Ptr<void>(request.location).get(mem));
+                               for (uint32_t row = 0; row < request.row_count; row++) {
+                                   memcpy(dst, src, request.row_bytes);
+                                   src += request.row_stride;
+                                   dst += request.row_stride;
+                               }
+                           } else {
+                               memcpy(Ptr<void>(request.location).get(mem), src, request.size);
+                           }
+                           renderer::vulkan::surface_sync_internal_write = false;
                        },
                        [&](PostSurfaceSyncRequest &request) {
                            wait_for_fences();
-
+                           renderer::vulkan::surface_sync_internal_write = true;
                            state.surface_cache.perform_post_surface_sync(mem, request.cache_info);
+                           renderer::vulkan::surface_sync_internal_write = false;
                        },
                        [&](SyncSignalRequest &request) {
                            wait_for_fences();
@@ -131,6 +143,11 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
     context.scene_wrote_depth = false;
     context.scene_has_drawn = false;
     context.scene_macroblock_flushed = false;
+
+    context.rendered_rect_x0 = INT32_MAX;
+    context.rendered_rect_y0 = INT32_MAX;
+    context.rendered_rect_x1 = 0;
+    context.rendered_rect_y1 = 0;
 
     context.render_target = rt;
     context.scene_timestamp++;
@@ -381,6 +398,14 @@ void VKContext::start_render_pass(bool create_descriptor_set) {
         curr_renderpass_info.renderArea.extent.height = std::min(curr_renderpass_info.renderArea.extent.height, max_h);
     }
 
+    if (render_target->has_macroblock_sync) {
+        const auto &area = curr_renderpass_info.renderArea;
+        rendered_rect_x0 = std::min(rendered_rect_x0, area.offset.x);
+        rendered_rect_y0 = std::min(rendered_rect_y0, area.offset.y);
+        rendered_rect_x1 = std::max(rendered_rect_x1, area.offset.x + static_cast<int32_t>(area.extent.width));
+        rendered_rect_y1 = std::max(rendered_rect_y1, area.offset.y + static_cast<int32_t>(area.extent.height));
+    }
+
     // only the depth-stencil attachment may be clear if not force loaded. It can sit at attachment index 1 or 2 (raw u16 attachment present) so provide the value at both
     std::array<vk::ClearValue, 3> curr_clear_values{};
     const vk::ClearDepthStencilValue ds_clear{
@@ -549,8 +574,28 @@ void VKContext::stop_recording(const SceGxmNotification &notif1, const SceGxmNot
             }
 
             // we must sync the two buffers
-            if (surface_info && surface_info->need_buffer_sync)
-                state.request_queue.push(BufferSyncRequest{ surface_info->data.address(), static_cast<uint32_t>(surface_info->total_bytes) });
+            if (surface_info && surface_info->need_buffer_sync) {
+                if (render_target->has_macroblock_sync && state.res_multiplier != 1.0f
+                    && rendered_rect_x1 > rendered_rect_x0 && rendered_rect_y1 > rendered_rect_y0) {
+                    const uint32_t bpp = gxm::bits_per_pixel(surface_info->format) / 8;
+                    const uint32_t row_stride_bytes = surface_info->stride_bytes;
+                    const int32_t nx0 = static_cast<int32_t>(rendered_rect_x0 / state.res_multiplier);
+                    const int32_t ny0 = static_cast<int32_t>(rendered_rect_y0 / state.res_multiplier);
+                    const int32_t nx1 = static_cast<int32_t>(rendered_rect_x1 / state.res_multiplier);
+                    const int32_t ny1 = static_cast<int32_t>(rendered_rect_y1 / state.res_multiplier);
+                    const Address rect_start = surface_info->data.address() + ny0 * row_stride_bytes + nx0 * bpp;
+                    const uint32_t rect_row_bytes = static_cast<uint32_t>(nx1 - nx0) * bpp;
+                    const uint32_t rect_row_count = static_cast<uint32_t>(ny1 - ny0);
+                    state.request_queue.push(BufferSyncRequest{
+                        rect_start,
+                        static_cast<uint32_t>(surface_info->total_bytes),
+                        row_stride_bytes,
+                        rect_row_bytes,
+                        rect_row_count });
+                } else {
+                    state.request_queue.push(BufferSyncRequest{ surface_info->data.address(), static_cast<uint32_t>(surface_info->total_bytes) });
+                }
+            }
         }
 
         if (surface_info && surface_info->need_post_surface_sync) {

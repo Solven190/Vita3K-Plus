@@ -95,7 +95,8 @@ static bool is_valid_output_path(const VitaIoDevice device) {
     return !(device == VitaIoDevice::savedata0 || device == VitaIoDevice::savedata1 || device == VitaIoDevice::app0
         || device == VitaIoDevice::_INVALID || device == VitaIoDevice::addcont0 || device == VitaIoDevice::tty0
         || device == VitaIoDevice::tty1 || device == VitaIoDevice::tty2 || device == VitaIoDevice::tty3
-        || device == VitaIoDevice::music0 || device == VitaIoDevice::photo0 || device == VitaIoDevice::video0);
+        || device == VitaIoDevice::music0 || device == VitaIoDevice::photo0 || device == VitaIoDevice::video0
+        || device == VitaIoDevice::memory);
 }
 
 bool init(IOState &io, const fs::path &cache_path, const fs::path &log_path, const fs::path &vita_fs_path, bool redirect_stdio) {
@@ -110,6 +111,8 @@ bool init(IOState &io, const fs::path &cache_path, const fs::path &log_path, con
     const fs::path vd0{ vita_fs_path / "vd0" };
 
     fs::create_directories(ux0 / "data");
+    fs::remove_all(ux0 / "data/memory");
+    fs::create_directories(ux0 / "data/memory");
     fs::create_directories(ux0 / "app");
     fs::create_directories(ux0 / "music");
     fs::create_directories(ux0 / "picture");
@@ -252,6 +255,11 @@ std::string translate_path(const char *path, VitaIoDevice &device, const IOState
     }
     case VitaIoDevice::photo0: { // Redirect photo0: to ux0:picture
         relative_path = device::remove_device_from_path(relative_path, device, "picture");
+        device = VitaIoDevice::ux0;
+        break;
+    }
+    case VitaIoDevice::memory: { // Redirect memory: (RAM work directory) to ux0:data/memory
+        relative_path = device::remove_device_from_path(relative_path, device, "data/memory");
         device = VitaIoDevice::ux0;
         break;
     }

@@ -751,6 +751,9 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
         }
 
         support_shader_interlock &= static_cast<bool>(physical_device_features.fragmentStoresAndAtomics);
+
+        // support_shader_interlock = false; // Nick - Useful for testing as RenderDoc won't always let you debug a shader with this on
+
         if (support_shader_interlock) {
             auto props = physical_device.getFeatures2KHR<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceFragmentShaderInterlockFeaturesEXT>();
             support_shader_interlock = static_cast<bool>(props.get<vk::PhysicalDeviceFragmentShaderInterlockFeaturesEXT>().fragmentShaderSampleInterlock);
@@ -992,7 +995,7 @@ void VKState::late_init(const Config &cfg, const std::string_view game_id, MemSt
 
     pipeline_cache.init(support_rasterized_order_access);
 
-    texture_cache.init(true, texture_folder(), game_id);
+    texture_cache.init(true, texture_folder(), game_id); // Nick - Turning off hashless texture cache can be useful for debugging
 }
 
 void VKState::cleanup() {
@@ -1497,7 +1500,13 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
 
     case MappingMethod::DoubleBuffer: {
         vkutil::Buffer buffer(size + KiB(4));
-        buffer.init_buffer(mapped_memory_flags, vkutil::vma_mapped_alloc);
+        constexpr vma::AllocationCreateInfo double_buffer_alloc = {
+            .flags = vma::AllocationCreateFlagBits::eHostAccessRandom | vma::AllocationCreateFlagBits::eMapped,
+            .usage = vma::MemoryUsage::eAutoPreferHost,
+            .requiredFlags = vk::MemoryPropertyFlagBits::eHostCoherent,
+            .preferredFlags = vk::MemoryPropertyFlagBits::eHostCached,
+        };
+        buffer.init_buffer(mapped_memory_flags, double_buffer_alloc);
 
         vk::BufferDeviceAddressInfoKHR address_info{
             .buffer = buffer.buffer

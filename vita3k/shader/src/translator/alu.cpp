@@ -1916,6 +1916,14 @@ bool USSETranslatorVisitor::vdual(
             return spv::NoResult;
         }
 
+        // Scalar-result ops (FRSQ/FRCP/FEXP/FLOG/FMUL/...) can target a multi-component
+        // destination mask (e.g. FRSQ i0.xyz i0.x): the hardware replicates the scalar into
+        // every masked component. Broadcast like the VDP/VSSQ postprocess and the vcomp
+        // handler do, otherwise store() writes only the first masked component.
+        if (result != spv::NoResult && m_b.getNumComponents(result) == 1) {
+            result = postprocess_dot_result_for_store(m_b, result, write_mask_dest);
+        }
+
         disasm_str += fmt::format("{} {}", disasm::opcode_str(code), disasm::operand_to_str(dest, write_mask_dest));
 
         for (Operand &op : ops)

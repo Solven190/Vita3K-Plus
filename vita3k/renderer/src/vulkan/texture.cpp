@@ -112,7 +112,8 @@ void sync_texture(VKContext &context, MemState &mem, std::size_t index, SceGxmTe
 
     TextureViewport texture_viewport{};
 
-    if (renderer::texture::convert_base_texture_format_to_base_color_format(base_format, format_target_of_texture)) {
+    bool color_convertible = renderer::texture::convert_base_texture_format_to_base_color_format(base_format, format_target_of_texture);
+    if (color_convertible) {
         // try to retrieve it from the color surface cache
         lookup_result = context.state.surface_cache.retrieve_color_surface_as_texture(texture, format_target_of_texture, &texture_viewport);
     }
