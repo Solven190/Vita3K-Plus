@@ -869,8 +869,14 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
                 .format = base_format
             };
             if (bytes_per_pixel_requested == bytes_per_pixel_in_store) {
-                casted->texture.width = original_width;
-                casted->texture.height = original_height;
+                const bool full_width_read = (start_x == 0) && (width == info.width);
+                if (full_width_read && !non_integer_downsample) {
+                    casted->texture.width = width;
+                    casted->texture.height = height;
+                } else {
+                    casted->texture.width = original_width;
+                    casted->texture.height = original_height;
+                }
             } else {
                 casted->texture.width = width;
                 casted->texture.height = height;
@@ -1337,14 +1343,25 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_depth_stencil_as_tex
     uint32_t surface_address = 0;
     DepthStencilSurfaceCacheInfo *found_info = nullptr;
 
+    auto surface_rows_allocated = [](const DepthStencilSurfaceCacheInfo *info) -> uint32_t {
+        if (info->memory_height <= 0)
+            return 0;
+        const uint32_t rows = static_cast<uint32_t>(info->memory_height);
+        return (info->tiling == SurfaceTiling::Tiled) ? align(rows, 32u) : rows;
+    };
+
     if (can_be_depth) {
         // get the first depth surface with an address lower or equal to address
         auto it = depth_address_lookup.upper_bound(address);
         if (it != depth_address_lookup.begin()) {
             --it;
 
+            uint32_t surface_bytes = it->second->total_bytes;
+            if (it->second->memory_height > 0)
+                surface_bytes = (surface_bytes / static_cast<uint32_t>(it->second->memory_height)) * surface_rows_allocated(it->second);
+
             // the texture must be contained entirely in the depth surface
-            if (address + total_bytes <= it->first + it->second->total_bytes) {
+            if (address + total_bytes <= it->first + surface_bytes) {
                 surface_address = it->first;
                 found_info = it->second;
             }
@@ -1358,7 +1375,7 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_depth_stencil_as_tex
 
             // note: we don't support sampling the stencil from a D24S8 depth-stencil
             // so we can assume any stencil uses only 1 byte per sample
-            uint32_t surface_bytes = it->second->stride_samples * it->second->memory_height * 1;
+            uint32_t surface_bytes = it->second->stride_samples * surface_rows_allocated(it->second) * 1;
 
             // the texture must be contained entirely in the stencil surface
             if (address + total_bytes <= it->first + surface_bytes) {
