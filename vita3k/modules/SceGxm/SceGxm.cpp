@@ -4778,6 +4778,8 @@ EXPORT(int, sceGxmShaderPatcherReleaseFragmentProgram, SceGxmShaderPatcher *shad
         while (fp->compile_threads_on.load(std::memory_order_acquire) > 0)
             std::this_thread::yield();
 
+        renderer::finish(*emuenv.renderer, nullptr);
+
         for (FragmentProgramCache::const_iterator it = shaderPatcher->fragment_program_cache.begin(); it != shaderPatcher->fragment_program_cache.end(); ++it) {
             if (it->second == fragmentProgram) {
                 shaderPatcher->fragment_program_cache.erase(it);
@@ -4800,6 +4802,8 @@ EXPORT(int, sceGxmShaderPatcherReleaseVertexProgram, SceGxmShaderPatcher *shader
     if (vp->reference_count == 0) {
         while (vp->compile_threads_on.load(std::memory_order_acquire) > 0)
             std::this_thread::yield();
+
+        renderer::finish(*emuenv.renderer, nullptr);
 
         for (VertexProgramCache::const_iterator it = shaderPatcher->vertex_program_cache.begin(); it != shaderPatcher->vertex_program_cache.end(); ++it) {
             if (it->second == vertexProgram) {

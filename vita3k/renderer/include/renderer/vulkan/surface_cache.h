@@ -306,6 +306,10 @@ public:
             last_written_surface->content_is_blended = true;
     }
 
+    bool current_surface_raw_is_valid() const {
+        return last_written_surface && last_written_surface->raw_image && !last_written_surface->content_is_blended;
+    }
+
     std::optional<TextureLookupResult> retrieve_depth_stencil_as_texture(const SceGxmTexture &texture, TextureViewport *texture_viewport);
 
     Framebuffer &retrieve_framebuffer_handle(MemState &mem, SceGxmColorSurface *color, SceGxmDepthStencilSurface *depth_stencil,

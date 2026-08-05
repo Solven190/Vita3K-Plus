@@ -1716,13 +1716,21 @@ SceSize msgpipe_recv(KernelState &kernel, const char *export_name, SceUID thread
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID);
     }
 
+    const auto wake_up = [&](const ThreadStatePtr &target) {
+        if (target == thread) {
+            target->update_status(ThreadStatus::run); // our own mutex is already held
+        } else {
+            const std::lock_guard<std::mutex> target_lock(target->mutex);
+            target->update_status(ThreadStatus::run);
+        }
+    };
+
     const auto wakeup_senders = [&] {
         if (!msgpipe->senders->empty()) {
             for (auto it = msgpipe->senders->begin(); it != msgpipe->senders->end(); ++it) {
                 auto threadInfo = (*it);
                 if (threadInfo.mp.request_size <= msgpipe->data_buffer.Free()) { // Found a thread we can service
-                    threadInfo.thread->status = ThreadStatus::run;
-                    threadInfo.thread->status_cond.notify_one();
+                    wake_up(threadInfo.thread);
 
                     msgpipe->senders->erase(it); // Erase other thread's info - done here to avoid race
                     break; // Should we try to signal other threads, too?
@@ -1769,7 +1777,9 @@ SceSize msgpipe_recv(KernelState &kernel, const char *export_name, SceUID thread
                     std::atomic_fetch_add(&msgpipe->remainingThreads, static_cast<size_t>(-1));
                     return SCE_KERNEL_ERROR_WAIT_DELETE;
                 }
+                thread_lock.unlock();
                 msgpipe_lock.lock(); // Lock message pipe again
+                thread_lock.lock();
                 availableSize = msgpipe->data_buffer.Used();
                 if (!((availableSize >= recvSize) || (ASAP && (availableSize > 0)))) {
                     if (thread->is_delete_requested()) {
@@ -1826,11 +1836,22 @@ SceSize msgpipe_send(KernelState &kernel, const char *export_name, SceUID thread
     if (sendSize > msgpipe->data_buffer.Capacity())
         return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_SIZE);
 
+    const ThreadStatePtr thread = kernel.get_thread(thread_id);
+
+    const auto wake_up = [&](const ThreadStatePtr &target) {
+        if (target == thread) {
+            target->update_status(ThreadStatus::run); // our own mutex is already held
+        } else {
+            const std::lock_guard<std::mutex> target_lock(target->mutex);
+            target->update_status(ThreadStatus::run);
+        }
+    };
+
     const auto wakeup_receivers = [&] { // TODO is this correct?
         if (!msgpipe->receivers->empty()) {
             for (auto it = msgpipe->receivers->begin(); it != msgpipe->receivers->end(); ++it) {
                 if ((*it).mp.request_size <= msgpipe->data_buffer.Used()) { // Found a thread we can service
-                    (*it).thread->update_status(ThreadStatus::run, ThreadStatus::wait);
+                    wake_up((*it).thread);
 
                     msgpipe->receivers->erase(it); // Erase other thread's info - done here to avoid race
                     break; // Should we try to signal other threads, too?
@@ -1838,8 +1859,6 @@ SceSize msgpipe_send(KernelState &kernel, const char *export_name, SceUID thread
             }
         }
     };
-
-    const ThreadStatePtr thread = kernel.get_thread(thread_id);
     std::unique_lock<std::mutex> msgpipe_lock(msgpipe->mutex);
     // check in case of delete happens while waiting (un)lock
     if (msgpipe->beingDeleted) {
@@ -1887,7 +1906,9 @@ SceSize msgpipe_send(KernelState &kernel, const char *export_name, SceUID thread
                     std::atomic_fetch_add(&msgpipe->remainingThreads, static_cast<size_t>(-1));
                     return SCE_KERNEL_ERROR_WAIT_DELETE;
                 }
+                thread_lock.unlock();
                 msgpipe_lock.lock(); // Lock message pipe before read from data_buffer
+                thread_lock.lock();
                 freeSize = msgpipe->data_buffer.Free();
                 if (!((freeSize >= sendSize) || (ASAP && (freeSize >= 1)))) {
                     if (thread->is_delete_requested()) {

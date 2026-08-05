@@ -477,7 +477,8 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     frag_ublock.writing_mask = context.record.writing_mask;
     frag_ublock.res_multiplier = context.state.res_multiplier;
     frag_ublock.use_raw_image = (context.state.features.preserve_f16_nan_as_u16
-                                    && context.record.color_base_format == SCE_GXM_COLOR_BASE_FORMAT_F16F16F16F16)
+                                    && context.record.color_base_format == SCE_GXM_COLOR_BASE_FORMAT_F16F16F16F16
+                                    && context.state.surface_cache.current_surface_raw_is_valid())
         ? 1.0f
         : 0.0f;
     const bool has_msaa = context.render_target->multisample_mode;
