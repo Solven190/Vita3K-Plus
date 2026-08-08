@@ -109,11 +109,23 @@ static void debug_log_message(std::string_view msg) {
 }
 
 static vk::DebugUtilsMessengerEXT debug_messenger;
+static bool debug_messenger_is_driver_only = false;
 static VKAPI_ATTR VkBool32 VKAPI_CALL debug_util_callback(
     vk::DebugUtilsMessageSeverityFlagBitsEXT message_severity,
     vk::DebugUtilsMessageTypeFlagsEXT message_type,
     const vk::DebugUtilsMessengerCallbackDataEXT *callback_data,
     void *pUserData) {
+    if (debug_messenger_is_driver_only) {
+        const std::string_view msg = callback_data->pMessage ? callback_data->pMessage : "(no message)";
+        if (message_severity >= vk::DebugUtilsMessageSeverityFlagBitsEXT::eError)
+            LOG_ERROR("Vulkan driver [{}]: {}", vk::to_string(message_type), msg);
+        else if (message_severity >= vk::DebugUtilsMessageSeverityFlagBitsEXT::eWarning)
+            LOG_WARN("Vulkan driver [{}]: {}", vk::to_string(message_type), msg);
+        else
+            LOG_INFO("Vulkan driver [{}]: {}", vk::to_string(message_type), msg);
+        return VK_FALSE;
+    }
+
     if (message_severity >= vk::DebugUtilsMessageSeverityFlagBitsEXT::eWarning
         // for now we are not interested by performance warnings
         && (message_type & ~vk::DebugUtilsMessageTypeFlagBitsEXT::ePerformance)) {
@@ -452,14 +464,19 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
         }
 
         std::vector<const char *> instance_layers;
+        const bool use_validation_layer = has_validation_layer && !found_debug_extension.empty() && config.validation_layer;
         if (has_validation_layer && !found_debug_extension.empty()) {
-            if (config.validation_layer) {
+            if (config.validation_layer)
                 LOG_INFO("Enabling vulkan validation layers (has a performance impact but allows better error messages)");
-                instance_layers.push_back(validation_layer.c_str());
-                instance_extensions.push_back(found_debug_extension.data());
-            } else {
+            else
                 LOG_INFO("Disabling Vulkan validation layers (may improve performance but provides limited error messages)");
-            }
+        }
+        if (use_validation_layer)
+            instance_layers.push_back(validation_layer.c_str());
+        // Always take the debug extension when the loader offers it, even without the validation layer
+        if (!found_debug_extension.empty()) {
+            instance_extensions.push_back(found_debug_extension.data());
+            debug_messenger_is_driver_only = !use_validation_layer;
         }
 
 #ifdef __APPLE__
@@ -501,25 +518,30 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
         instance = vk::createInstance(instance_info);
         VULKAN_HPP_DEFAULT_DISPATCHER.init(instance);
 
-        if (has_validation_layer && !found_debug_extension.empty() && config.validation_layer) {
+        if (!found_debug_extension.empty()) {
             // we support two debugging extensions
             if (found_debug_extension == VK_EXT_DEBUG_UTILS_EXTENSION_NAME) {
                 vk::DebugUtilsMessengerCreateInfoEXT debug_info{
                     .messageSeverity = vk::DebugUtilsMessageSeverityFlagBitsEXT::eVerbose
+                        | vk::DebugUtilsMessageSeverityFlagBitsEXT::eInfo
                         | vk::DebugUtilsMessageSeverityFlagBitsEXT::eWarning | vk::DebugUtilsMessageSeverityFlagBitsEXT::eError,
                     .messageType = vk::DebugUtilsMessageTypeFlagBitsEXT::eGeneral
                         | vk::DebugUtilsMessageTypeFlagBitsEXT::eValidation | vk::DebugUtilsMessageTypeFlagBitsEXT::ePerformance,
                     .pfnUserCallback = debug_util_callback
                 };
                 debug_messenger = instance.createDebugUtilsMessengerEXT(debug_info);
+                LOG_INFO("Vulkan debug messenger installed ({})", debug_messenger_is_driver_only ? "driver diagnostics only, no validation layer" : "with validation layer");
 
             } else if (found_debug_extension == VK_EXT_DEBUG_REPORT_EXTENSION_NAME) {
                 vk::DebugReportCallbackCreateInfoEXT report_info{
-                    .flags = vk::DebugReportFlagBitsEXT::eError,
+                    .flags = vk::DebugReportFlagBitsEXT::eError | vk::DebugReportFlagBitsEXT::eWarning,
                     .pfnCallback = debug_report_callback
                 };
                 debug_report = instance.createDebugReportCallbackEXT(report_info);
+                LOG_INFO("Vulkan debug report callback installed");
             }
+        } else {
+            LOG_WARN("Neither VK_EXT_debug_utils nor VK_EXT_debug_report is available: driver errors will have no message");
         }
     }
 
@@ -665,13 +687,22 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
 #endif
         };
 
+        uint32_t available_extension_count = 0;
         for (const vk::ExtensionProperties &ext : physical_device.enumerateDeviceExtensionProperties()) {
+            available_extension_count++;
             auto it = optional_extensions.find(ext.extensionName.data());
             if (it != optional_extensions.end()) {
                 // this extension is available on the GPU
                 *it->second = true;
                 device_extensions.push_back(it->first.data());
             }
+        }
+
+        {
+            std::string enabled;
+            for (const char *ext : device_extensions)
+                enabled += (enabled.empty() ? "" : ", ") + std::string(ext);
+            LOG_INFO("Device extensions: {} available, {} enabled: {}", available_extension_count, device_extensions.size(), enabled);
         }
 
         bool support_memory_mapping = true;
@@ -997,6 +1028,82 @@ void VKState::late_init(const Config &cfg, const std::string_view game_id, MemSt
     pipeline_cache.init(support_rasterized_order_access);
 
     texture_cache.init(true, texture_folder(), game_id); // Nick - Turning off hashless texture cache can be useful for debugging
+
+    log_gpu_configuration();
+}
+
+// Everything a rendering bug report needs about the host GPU, printed once
+void VKState::log_gpu_configuration() {
+    LOG_INFO("=== GPU CONFIGURATION ===");
+    LOG_INFO("  device: {} (type {}, vendor 0x{:X}, device 0x{:X})", physical_device_properties.deviceName.data(),
+        vk::to_string(physical_device_properties.deviceType), physical_device_properties.vendorID,
+        physical_device_properties.deviceID);
+    LOG_INFO("  api version: {}.{}.{}  driver version: 0x{:X}",
+        VK_API_VERSION_MAJOR(physical_device_properties.apiVersion),
+        VK_API_VERSION_MINOR(physical_device_properties.apiVersion),
+        VK_API_VERSION_PATCH(physical_device_properties.apiVersion), physical_device_properties.driverVersion);
+
+    // the instance is created as Vulkan 1.0, so the core 1.1 entry point may not be resolved;
+    // the rest of the renderer goes through the KHR alias for the same reason
+    if (physical_device_properties.apiVersion >= VK_API_VERSION_1_2
+        && VULKAN_HPP_DEFAULT_DISPATCHER.vkGetPhysicalDeviceProperties2KHR) {
+        const auto chain = physical_device.getProperties2KHR<vk::PhysicalDeviceProperties2, vk::PhysicalDeviceDriverProperties>();
+        const auto &driver = chain.get<vk::PhysicalDeviceDriverProperties>();
+        LOG_INFO("  driverID: {}  driverName: {}  driverInfo: {}  conformance: {}.{}.{}.{}",
+            vk::to_string(driver.driverID), driver.driverName.data(), driver.driverInfo.data(),
+            driver.conformanceVersion.major, driver.conformanceVersion.minor,
+            driver.conformanceVersion.subminor, driver.conformanceVersion.patch);
+    }
+
+    const vk::PhysicalDeviceLimits &l = physical_device_properties.limits;
+    LOG_INFO("  limits: maxColorAttachments={} maxFragmentOutputAttachments={} maxBoundDescriptorSets={} maxPushConstantsSize={}",
+        l.maxColorAttachments, l.maxFragmentOutputAttachments, l.maxBoundDescriptorSets, l.maxPushConstantsSize);
+    LOG_INFO("  limits: maxVertexInputAttributes={} maxVertexInputBindings={} maxVertexInputAttributeOffset={} maxVertexInputBindingStride={}",
+        l.maxVertexInputAttributes, l.maxVertexInputBindings, l.maxVertexInputAttributeOffset, l.maxVertexInputBindingStride);
+    LOG_INFO("  limits: maxPerStageDescriptorSampledImages={} maxPerStageDescriptorUniformBuffers={} maxPerStageDescriptorStorageBuffers={} maxImageDimension2D={}",
+        l.maxPerStageDescriptorSampledImages, l.maxPerStageDescriptorUniformBuffers,
+        l.maxPerStageDescriptorStorageBuffers, l.maxImageDimension2D);
+    LOG_INFO("  limits: maxFragmentCombinedOutputResources={} maxFragmentInputComponents={} maxVertexOutputComponents={} subPixelPrecisionBits={}",
+        l.maxFragmentCombinedOutputResources, l.maxFragmentInputComponents, l.maxVertexOutputComponents,
+        l.subPixelPrecisionBits);
+
+    const vk::PhysicalDeviceFeatures &f = physical_device_features;
+    LOG_INFO("  core features: independentBlend={} fragmentStoresAndAtomics={} vertexPipelineStoresAndAtomics={} dualSrcBlend={} logicOp={}",
+        static_cast<bool>(f.independentBlend), static_cast<bool>(f.fragmentStoresAndAtomics),
+        static_cast<bool>(f.vertexPipelineStoresAndAtomics), static_cast<bool>(f.dualSrcBlend),
+        static_cast<bool>(f.logicOp));
+    LOG_INFO("  core features: depthClamp={} depthBiasClamp={} depthBounds={} wideLines={} fillModeNonSolid={} largePoints={}",
+        static_cast<bool>(f.depthClamp), static_cast<bool>(f.depthBiasClamp), static_cast<bool>(f.depthBounds),
+        static_cast<bool>(f.wideLines), static_cast<bool>(f.fillModeNonSolid), static_cast<bool>(f.largePoints));
+    LOG_INFO("  core features: shaderInt16={} shaderInt64={} shaderFloat64={} shaderClipDistance={} shaderCullDistance={}",
+        static_cast<bool>(f.shaderInt16), static_cast<bool>(f.shaderInt64), static_cast<bool>(f.shaderFloat64),
+        static_cast<bool>(f.shaderClipDistance), static_cast<bool>(f.shaderCullDistance));
+    LOG_INFO("  core features: shaderStorageImageExtendedFormats={} shaderStorageImageWriteWithoutFormat={} shaderStorageImageReadWithoutFormat={} shaderImageGatherExtended={}",
+        static_cast<bool>(f.shaderStorageImageExtendedFormats), static_cast<bool>(f.shaderStorageImageWriteWithoutFormat),
+        static_cast<bool>(f.shaderStorageImageReadWithoutFormat), static_cast<bool>(f.shaderImageGatherExtended));
+    LOG_INFO("  core features: samplerAnisotropy={} textureCompressionBC={} textureCompressionETC2={} textureCompressionASTC_LDR={} geometryShader={}",
+        static_cast<bool>(f.samplerAnisotropy), static_cast<bool>(f.textureCompressionBC),
+        static_cast<bool>(f.textureCompressionETC2), static_cast<bool>(f.textureCompressionASTC_LDR),
+        static_cast<bool>(f.geometryShader));
+
+    LOG_INFO("  renderer flags: support_rasterized_order_access={} support_fsr={} support_standard_layout={} deep_stencil={}",
+        support_rasterized_order_access, support_fsr, support_standard_layout, vk::to_string(deep_stencil_use));
+    LOG_INFO("  FeatureState: support_shader_interlock={} support_texture_barrier={} direct_fragcolor={} preserve_f16_nan_as_u16={}",
+        features.support_shader_interlock, features.support_texture_barrier, features.direct_fragcolor,
+        features.preserve_f16_nan_as_u16);
+    LOG_INFO("  FeatureState: use_mask_bit={} support_unknown_format={} support_rgb_attributes={} support_scaled_attribute_formats={}",
+        features.use_mask_bit, features.support_unknown_format, features.support_rgb_attributes,
+        features.support_scaled_attribute_formats);
+    LOG_INFO("  FeatureState: enable_memory_mapping={} use_texture_viewport={} spirv_shader={} features_mask=0x{:X}",
+        features.enable_memory_mapping, features.use_texture_viewport, features.spirv_shader, get_features_mask());
+    LOG_INFO("  derived: should_use_shader_interlock={} should_use_texture_barrier={} programmable_blending={}",
+        features.should_use_shader_interlock(), features.should_use_texture_barrier(),
+        features.is_programmable_blending_supported());
+    LOG_INFO("  build switches: enable_depth_clamp={}", enable_depth_clamp);
+    // shaders_path is only filled in by set_app(), which runs after this, so it is reported by the
+    // pipeline failure dump instead
+    LOG_INFO("  shader version: vk{}", shader::CURRENT_VERSION);
+    LOG_INFO("=== END GPU CONFIGURATION ===");
 }
 
 void VKState::cleanup() {
@@ -1230,6 +1337,19 @@ void VKState::swap_window() {
 
     // look once a frame if we need to save the pipeline cache
     const auto time_s = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+
+    // Renderer heartbeat. If the emulator ever appears frozen, this is what says whether frames are still being presented
+    static uint64_t frames_presented = 0;
+    static int64_t next_heartbeat = 0;
+    frames_presented++;
+    if (time_s >= next_heartbeat) {
+        if (next_heartbeat != 0) {
+            LOG_DEBUG("renderer heartbeat: {} frames presented, pipelines created={} failed={}",
+                frames_presented, pipeline_cache.pipelines_created.load(), pipeline_cache.pipelines_failed.load());
+        }
+        next_heartbeat = time_s + 5;
+    }
+
     if (time_s >= pipeline_cache.next_pipeline_cache_save) {
         pipeline_cache.save_pipeline_cache();
 
@@ -1257,6 +1377,11 @@ uint32_t VKState::get_features_mask() {
             bool use_memory_mapping : 1;
             bool use_rgb_attributes : 1;
             bool use_scaled_attributes : 1;
+            bool use_mask_bit : 1;
+            bool preserve_f16_nan_as_u16 : 1;
+            bool direct_fragcolor : 1;
+            bool support_texture_barrier : 1;
+            bool support_unknown_format : 1;
         };
         uint32_t value;
     } features_mask;
@@ -1268,6 +1393,11 @@ uint32_t VKState::get_features_mask() {
     features_mask.use_memory_mapping = features.enable_memory_mapping;
     features_mask.use_rgb_attributes = features.support_rgb_attributes;
     features_mask.use_scaled_attributes = pipeline_cache.support_scaled_vertex_attribute;
+    features_mask.use_mask_bit = features.use_mask_bit;
+    features_mask.preserve_f16_nan_as_u16 = features.preserve_f16_nan_as_u16;
+    features_mask.direct_fragcolor = features.direct_fragcolor;
+    features_mask.support_texture_barrier = features.support_texture_barrier;
+    features_mask.support_unknown_format = features.support_unknown_format;
 
     return features_mask.value;
 }

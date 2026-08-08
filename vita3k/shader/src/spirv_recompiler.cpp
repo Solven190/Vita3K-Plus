@@ -345,6 +345,19 @@ static spv::Id create_builtin_sampler(spv::Builder &b, const FeatureState &featu
         // f_mask is always rgba8
         format = spv::ImageFormat::ImageFormatRgba8;
 
+    // Only a fixed set of storage image formats is available without StorageImageExtendedFormats,
+    // and translate_color_format can return three that are not in it. glslang does not add the
+    // capability for us, so declaring the format without it produces a module that strict drivers refuse
+    switch (format) {
+    case spv::ImageFormat::ImageFormatRg32f:
+    case spv::ImageFormat::ImageFormatRgb10A2:
+    case spv::ImageFormat::ImageFormatR11fG11fB10f:
+        b.addCapability(spv::CapabilityStorageImageExtendedFormats);
+        break;
+    default:
+        break;
+    }
+
     spv::Id image_type = b.makeImageType(sampled_type, spv::Dim2D, false, false, false, sampled, format);
     spv::Id sampler = b.createVariable(spv::NoPrecision, spv::StorageClassUniformConstant, image_type, name.c_str());
 

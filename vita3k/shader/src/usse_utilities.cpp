@@ -651,6 +651,7 @@ static spv::Id make_or_get_buffer_ptr(spv::Builder &b, shader::usse::utils::Spir
 
 void buffer_address_access(spv::Builder &b, const SpirvShaderParameters &params, SpirvUtilFunctions &utils, const FeatureState &features, Operand dest, int dest_offset, spv::Id addr, uint32_t component_size, uint32_t nb_components, int buffer_idx, bool is_buffer_store) {
     const spv::Id i32 = b.makeIntType(32);
+    const spv::Id u32 = b.makeUintType(32);
     const spv::Id zero = b.makeIntConstant(0);
 
     spv::Id buffer_address;
@@ -687,8 +688,8 @@ void buffer_address_access(spv::Builder &b, const SpirvShaderParameters &params,
     buffer_address = add_uvec2_int(b, buffer_address, addr);
 
     if (component_size == sizeof(uint32_t)) {
-        spv::Id aligned_low_bits = b.createCompositeExtract(buffer_address, i32, 0);
-        aligned_low_bits = b.createBinOp(spv::OpBitwiseAnd, i32, aligned_low_bits, b.makeIntConstant(~0b11));
+        spv::Id aligned_low_bits = b.createCompositeExtract(buffer_address, u32, 0);
+        aligned_low_bits = b.createBinOp(spv::OpBitwiseAnd, u32, aligned_low_bits, b.makeUintConstant(~0b11u));
         buffer_address = b.createCompositeInsert(aligned_low_bits, buffer_address, b.getTypeId(buffer_address), 0);
 
         int buffer_idx_vec4 = 0;
@@ -744,9 +745,9 @@ void buffer_address_access(spv::Builder &b, const SpirvShaderParameters &params,
         for (uint32_t component_idx = 0; component_idx < nb_components; component_idx++) {
             spv::Id component_addr = add_uvec2_uint(b, buffer_address, b.makeUintConstant(component_idx * component_size));
             // we must make it 4-byte aligned
-            spv::Id addr_low_bits = b.createCompositeExtract(component_addr, i32, 0);
-            spv::Id alignment = b.createBinOp(spv::OpBitwiseAnd, i32, addr_low_bits, b.makeIntConstant(0b11));
-            addr_low_bits = b.createBinOp(spv::OpBitwiseAnd, i32, addr_low_bits, b.makeIntConstant(~0b11));
+            spv::Id addr_low_bits = b.createCompositeExtract(component_addr, u32, 0);
+            spv::Id alignment = b.createUnaryOp(spv::OpBitcast, i32, b.createBinOp(spv::OpBitwiseAnd, u32, addr_low_bits, b.makeUintConstant(0b11u)));
+            addr_low_bits = b.createBinOp(spv::OpBitwiseAnd, u32, addr_low_bits, b.makeUintConstant(~0b11u));
             component_addr = b.createCompositeInsert(addr_low_bits, component_addr, b.getTypeId(component_addr), 0);
 
             // now we can finally load it

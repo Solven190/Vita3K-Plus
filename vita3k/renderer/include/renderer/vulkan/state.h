@@ -164,6 +164,9 @@ struct VKState : public renderer::State {
     void precompile_shader(const ShadersHash &hash) override;
     void preclose_action() override;
 
+    // dumps the resolved device/driver/feature configuration to the log, once, from late_init
+    void log_gpu_configuration();
+
     inline FrameObject &frame() {
         return frames[current_frame_idx];
     }

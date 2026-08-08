@@ -17,6 +17,7 @@
 
 #include <chrono>
 #include <future>
+#include <memory>
 #include <renderer/commands.h>
 #include <renderer/driver_functions.h>
 #include <renderer/state.h>
