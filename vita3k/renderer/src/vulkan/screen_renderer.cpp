@@ -262,6 +262,11 @@ void ScreenRenderer::create_swapchain() {
     // Create Swapchain
     {
         vk::ImageUsageFlags surface_usage = vk::ImageUsageFlagBits::eColorAttachment;
+        support_swapchain_transfer_dst = static_cast<bool>(surface_capabilities.supportedUsageFlags & vk::ImageUsageFlagBits::eTransferDst);
+        if (support_swapchain_transfer_dst)
+            surface_usage |= vk::ImageUsageFlagBits::eTransferDst;
+        if (surface_capabilities.supportedUsageFlags & vk::ImageUsageFlagBits::eTransferSrc)
+            surface_usage |= vk::ImageUsageFlagBits::eTransferSrc;
         vk::ImageUsageFlags fsr_flags = vk::ImageUsageFlagBits::eTransferDst;
         if (!state.is_adreno_turnip)
             // workaround for a Turnip driver bug: adding storage flag here breaks the swapchain
@@ -271,6 +276,11 @@ void ScreenRenderer::create_swapchain() {
         if (surface_capabilities.supportedUsageFlags & vk::ImageUsageFlagBits::eStorage)
             // needed for FSR
             surface_usage |= fsr_flags;
+
+        LOG_INFO("swapchain: format={} colorspace={} extent={}x{} supportedUsage=0x{:X} chosenUsage=0x{:X} images={} currentTransform={} usedTransform=Identity",
+            vk::to_string(surface_format.format), vk::to_string(surface_format.colorSpace), extent.width, extent.height,
+            static_cast<uint32_t>(surface_capabilities.supportedUsageFlags), static_cast<uint32_t>(surface_usage),
+            swapchain_size, vk::to_string(surface_capabilities.currentTransform));
 
         vk::CompositeAlphaFlagBitsKHR comp_alpha = vk::CompositeAlphaFlagBitsKHR::eOpaque;
         if (!(surface_capabilities.supportedCompositeAlpha & comp_alpha))
@@ -524,7 +534,15 @@ void ScreenRenderer::render(vk::ImageView image_view, vk::ImageLayout layout, co
     // if there is too much load on the GPU, it just drops any render pass with ImGui graphics in it....
     // I still don't know exactly why
     // so as a partial fix, render the gui and screen in different render passes
-    if (state.is_adreno_stock) {
+    const bool keep_single_pass = state.mapping_method == MappingMethod::PageTable
+        || state.mapping_method == MappingMethod::NativeBuffer;
+    if (state.is_adreno_stock && keep_single_pass) {
+        static bool logged_single_pass = false;
+        if (!logged_single_pass) {
+            logged_single_pass = true;
+            LOG_INFO("present: SINGLE-PASS mode active (game + GUI in one render pass, PT/NB on stock Adreno)");
+        }
+    } else if (state.is_adreno_stock) {
         current_cmd_buffer.endRenderPass();
         pass_info.renderPass = stock_adreno_pass;
         current_cmd_buffer.beginRenderPass(pass_info, vk::SubpassContents::eInline);
@@ -672,13 +690,11 @@ void ScreenRenderer::create_render_pass() {
         .setInitialLayout(vk::ImageLayout::eGeneral);
     post_filter_render_pass = state.device.createRenderPass(pass_info);
 
-#ifdef __ANDROID__
     if (state.is_adreno_stock) {
         // used to fix an adreno driver bug
         color_attachment.setInitialLayout(vk::ImageLayout::ePresentSrcKHR);
         stock_adreno_pass = state.device.createRenderPass(pass_info);
     }
-#endif
 }
 
 void ScreenRenderer::create_surface_image() {

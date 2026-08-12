@@ -116,6 +116,8 @@ struct ColorSurfaceCacheInfo : public SurfaceCacheInfo {
     bool content_is_blended = false;
     // which image the cached reinterpret_store_view was created on (it must follow the choice)
     bool reinterpret_view_is_raw = false;
+    // the game has bound a cast view byte-addressed at a non-zero word of this store
+    bool has_phase_view = false;
 
     // only used for 3-component rgb textures which can't be copied directly
     std::unique_ptr<vkutil::Buffer> copy_buffer;
@@ -185,6 +187,8 @@ struct TextureLookupResult {
     vk::ImageView view;
     vkutil::ImageLayout layout;
     vk::Format format;
+    bool is_typeless_cast = false;
+    bool cast_phase_hi = false;
 };
 
 // result when trying to retrieve a surface from the surface cache
@@ -202,6 +206,7 @@ struct ReinterpretPushConstants {
     uint32_t scaled_store_h;
     uint32_t ratio;
     uint32_t half_index;
+    uint32_t interleave;
 };
 
 class VKSurfaceCache {
@@ -298,6 +303,9 @@ public:
 
     bool begin_ds_scene_depth_check(const SceGxmDepthStencilSurface &depth_stencil, bool this_scene_stores, Address scene_color_addr);
     void resolve_ds_scene_end(bool scene_wrote_depth);
+
+    bool try_transfer_depth_gpu(Address src_address, Address dst_address, uint32_t width, uint32_t height);
+
     void perform_pending_casts(VKContext &context, uint16_t vert_texture_count, uint16_t frag_texture_count);
     void flush_all_pending_casts();
 
@@ -341,7 +349,11 @@ public:
 
     // Return the image along with the viewport to be displayed on the screen
     // Viewport should already have its fields width and height filled
-    vk::ImageView sourcing_color_surface_for_presentation(Ptr<const void> address, uint32_t pitch, Viewport &viewport);
+    struct PresentSurfaceInfo {
+        vk::Image image;
+        bool plain_rgba8;
+    };
+    vk::ImageView sourcing_color_surface_for_presentation(Ptr<const void> address, uint32_t pitch, Viewport &viewport, PresentSurfaceInfo *present_info = nullptr);
 
     // Dump an rgba8 frame with the given properties to the returned vector
     // if this function fails, the vector will be empty

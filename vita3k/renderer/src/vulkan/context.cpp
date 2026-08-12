@@ -72,6 +72,7 @@ void VKContext::wait_thread_function(const MemState &mem) {
                            if (request.notifications[0].address || request.notifications[1].address) {
                                wait_for_fences();
 
+                               const std::shared_lock<std::shared_mutex> transition_lock(mem.external_transition_mutex);
                                // same as in handle_sync_surface_data
                                std::unique_lock<std::mutex> lock(state.notification_mutex);
 
@@ -97,6 +98,7 @@ void VKContext::wait_thread_function(const MemState &mem) {
                        },
                        [&](BufferSyncRequest &request) {
                            wait_for_fences();
+                           const std::shared_lock<std::shared_mutex> transition_lock(mem.external_transition_mutex);
                            auto mem_it = state.mapped_memories.lower_bound(request.location);
                            if (mem_it == state.mapped_memories.end() || mem_it->first + mem_it->second.size < request.location + request.size) {
                                LOG_ERROR("Buffer Sync request for {}-{} is not fully mapped", log_hex(request.location), log_hex(request.location + request.size));
@@ -119,6 +121,7 @@ void VKContext::wait_thread_function(const MemState &mem) {
                        },
                        [&](PostSurfaceSyncRequest &request) {
                            wait_for_fences();
+                           const std::shared_lock<std::shared_mutex> transition_lock(mem.external_transition_mutex);
                            renderer::vulkan::surface_sync_internal_write = true;
                            state.surface_cache.perform_post_surface_sync(mem, request.cache_info);
                            renderer::vulkan::surface_sync_internal_write = false;
@@ -126,9 +129,12 @@ void VKContext::wait_thread_function(const MemState &mem) {
                        [&](SyncSignalRequest &request) {
                            wait_for_fences();
 
+                           const std::shared_lock<std::shared_mutex> transition_lock(mem.external_transition_mutex);
                            renderer::subject_done(request.sync, request.timestamp);
                        },
                        [&](CallbackRequest &request) {
+                           if (request.wait_for_gpu)
+                               wait_for_fences();
                            if (request.callback) {
                                (*request.callback)();
                                delete request.callback;

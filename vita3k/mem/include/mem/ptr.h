@@ -37,7 +37,7 @@ public:
     }
 
     Ptr(T *pointer, const MemState &mem) {
-        addr = host_to_guest(mem, pointer);
+        addr = host_to_guest(mem, reinterpret_cast<const void *>(pointer));
     }
 
     Address address() const {

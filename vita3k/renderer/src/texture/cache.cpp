@@ -39,6 +39,9 @@
 namespace renderer {
 namespace texture {
 
+// GPU writes don't trip write-protection, so keep hashing large textures
+static constexpr bool protect_only_is_sufficient = true;
+
 static uint64_t hash_data(const void *data, size_t size) {
     return XXH3_64bits(data, size);
 }
@@ -701,7 +704,7 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
             range_protect_end = align_down((gxm_texture.data_addr << 2) + info->texture_size, mem.host_page_size);
 
             if (range_protect_end - range_protect_begin >= mem.host_page_size * 4) {
-                should_use_hash = false;
+                should_use_hash = protect_only_is_sufficient;
             }
         }
 
@@ -829,8 +832,6 @@ int TextureCache::cache_and_bind_sampler(const SceGxmTexture &gxm_texture, bool 
             | (gxm_texture.mag_filter << 8);
     }
 
-    // the depth part only matters if we can't apply linear filtering to it
-    is_depth &= !support_depth_linear_filtering;
     compact_repr |= (static_cast<uint32_t>(is_depth) << 23);
 
     auto it = sampler_lookup.find(compact_repr);

@@ -488,6 +488,21 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     else if (!has_msaa && has_downscale)
         frag_ublock.res_multiplier /= 2;
 
+    // Cast-sampler UV re-anchor inputs
+    frag_ublock.cast_sampler_mask = static_cast<float>(context.curr_frag_ublock.cast_sampler_bits);
+    frag_ublock.cast_phase_mask = static_cast<float>(context.curr_frag_ublock.cast_phase_bits);
+    frag_ublock.inv_frag_width = 1.0f / static_cast<float>(context.render_target->width);
+    frag_ublock.inv_frag_height = 1.0f / static_cast<float>(context.render_target->height);
+    if (context.curr_frag_ublock.cast_sampler_bits != 0) {
+        static uint64_t reanchor_log_n = 0;
+        if (reanchor_log_n < 16 || (reanchor_log_n % 512) == 0)
+            LOG_INFO("UV re-anchor: mask=0x{:X} phase=0x{:X} rt={}x{} res_mult={} surface_orig={}x{}",
+                context.curr_frag_ublock.cast_sampler_bits, context.curr_frag_ublock.cast_phase_bits,
+                context.render_target->width, context.render_target->height,
+                frag_ublock.res_multiplier, context.record.color_surface.width, context.record.color_surface.height);
+        reanchor_log_n++;
+    }
+
     if (context.curr_frag_ublock.changed || memcmp(&context.prev_frag_ublock, &frag_ublock, sizeof(frag_ublock)) != 0) {
         // TODO: this intermediate step can be avoided
         context.curr_frag_ublock.copy_to(context.shader_info_temp);

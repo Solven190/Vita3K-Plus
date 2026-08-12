@@ -21,6 +21,7 @@
 #include <mem/util.h>
 
 #include <functional>
+#include <string>
 
 struct MemState;
 
@@ -63,6 +64,7 @@ bool is_valid_addr(const MemState &state, Address addr);
 Address host_to_guest(const MemState &state, const void *host);
 bool is_valid_addr_range(const MemState &state, Address start, Address end);
 bool handle_access_violation(MemState &state, uint8_t *addr, bool write) noexcept;
+void set_fault_context_provider(std::string (*provider)());
 Block alloc_block(MemState &mem, uint32_t size, const char *name, Address start_addr = user_main_memory_start);
 Address alloc_at(MemState &state, Address address, uint32_t size, const char *name);
 Address try_alloc_at(MemState &state, Address address, uint32_t size, const char *name);

@@ -39,6 +39,9 @@ extern "C" {
 
 namespace renderer {
 
+// Perform a depth-to-depth sceGxmTransferCopy on the GPU (false = old behaviour i.e. transfer does nothing)
+static constexpr bool use_gpu_depth_transfer = true;
+
 template <typename T, SceGxmTransferColorKeyMode mode, SceGxmTransferType src_type, SceGxmTransferType dst_type>
 static void perform_transfer_copy_impl(MemState &mem, const SceGxmTransferImage &src, const SceGxmTransferImage &dst, uint32_t key_value, uint32_t key_mask) {
     T *__restrict__ src_ptr = src.address.cast<T>().get(mem);
@@ -187,6 +190,14 @@ COMMAND(handle_transfer_copy) {
     const SceGxmTransferFormat dst_fmt = images[1].format;
     SceGxmTransferType src_type = helper.pop<SceGxmTransferType>();
     SceGxmTransferType dst_type = helper.pop<SceGxmTransferType>();
+
+    if (use_gpu_depth_transfer && renderer.current_backend == Backend::Vulkan) {
+        auto &vk_state = dynamic_cast<vulkan::VKState &>(renderer);
+        if (vk_state.surface_cache.try_transfer_depth_gpu(images[0].address.address(), images[1].address.address(), images[0].width, images[0].height)) {
+            delete[] images;
+            return;
+        }
+    }
 
     if (src_fmt != dst_fmt) {
         LOG_ERROR_ONCE("Unhandled format conversion from 0x{:0X} to 0x{:0X}", fmt::underlying(src_fmt), fmt::underlying(dst_fmt));

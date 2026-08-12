@@ -106,6 +106,7 @@ struct TranslationState {
     spv::Id color_attachment_raw_id = spv::NoResult;
     spv::Id mask_id = spv::NoResult;
     spv::Id frag_coord_id = spv::NoResult;
+    spv::Id front_facing_id = spv::NoResult;
     spv::Id render_info_id = spv::NoResult;
     std::vector<VarToReg> var_to_regs;
     std::vector<spv::Id> interfaces;
@@ -445,6 +446,11 @@ static void create_fragment_inputs(spv::Builder &b, SpirvShaderParameters &param
 
     translation_state.interfaces.push_back(current_coord);
     translation_state.frag_coord_id = current_coord;
+
+    spv::Id front_facing_var = b.createVariable(spv::NoPrecision, spv::StorageClassInput, b.makeBoolType(), "gl_FrontFacing");
+    b.addDecoration(front_facing_var, spv::DecorationBuiltIn, spv::BuiltInFrontFacing);
+    translation_state.interfaces.push_back(front_facing_var);
+    translation_state.front_facing_id = front_facing_var;
 
     // It may actually be total fragments input
     for (size_t i = 0; i < vertex_varyings_ptr->varyings_count; i++, descriptor++) {
@@ -1117,7 +1123,7 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
     }
 
     if (program_type == SceGxmProgramType::Fragment) {
-        std::vector<spv::Id> uniform_composition = { f32, f32, f32, f32, f32 };
+        std::vector<spv::Id> uniform_composition = { f32, f32, f32, f32, f32, f32, f32, f32, f32 };
         if (uniform_buffer_count > 0)
             uniform_composition.push_back(buffer_addresses_type);
         if (uniform_texture_count > 0) {
@@ -1141,6 +1147,10 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
         ADD_FRAG_UNIFORM_MEMBER(writing_mask);
         ADD_FRAG_UNIFORM_MEMBER(use_raw_image);
         ADD_FRAG_UNIFORM_MEMBER(res_multiplier);
+        ADD_FRAG_UNIFORM_MEMBER(cast_sampler_mask);
+        ADD_FRAG_UNIFORM_MEMBER(cast_phase_mask);
+        ADD_FRAG_UNIFORM_MEMBER(inv_frag_width);
+        ADD_FRAG_UNIFORM_MEMBER(inv_frag_height);
 
 #undef ADD_FRAG_UNIFORM_MEMBER
         // the resolution multiplier does not require a high precision
@@ -1494,8 +1504,11 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
         }
     }
 
-    if (translation_state.is_fragment)
+    if (translation_state.is_fragment) {
         create_fragment_inputs(b, spv_params, utils, features, translation_state, texture_queries, samplers, program);
+        spv_params.frag_coord_id = translation_state.frag_coord_id;
+        spv_params.front_facing_id = translation_state.front_facing_id;
+    }
 
     return spv_params;
 }
@@ -1864,12 +1877,15 @@ static spv::Function *make_frag_initialize_function(spv::Builder &b, Translation
     spv::Id booltype = b.makeBoolType();
     spv::Id zero = b.makeFloatConstant(0.0f);
 
-    spv::Id front_facing = b.createVariable(spv::NoPrecision, spv::StorageClassInput, booltype, "gl_FrontFacing");
+    spv::Id front_facing = translate_state.front_facing_id;
+    if (front_facing == spv::NoResult) {
+        front_facing = b.createVariable(spv::NoPrecision, spv::StorageClassInput, booltype, "gl_FrontFacing");
+        b.addDecoration(front_facing, spv::DecorationBuiltIn, spv::BuiltInFrontFacing);
+        translate_state.interfaces.push_back(front_facing);
+        translate_state.front_facing_id = front_facing;
+    }
     spv::Id front_disabled = utils::create_access_chain(b, spv::StorageClassUniform, translate_state.render_info_id, { b.makeIntConstant(FRAG_UNIFORM_front_disabled) });
     spv::Id back_disabled = utils::create_access_chain(b, spv::StorageClassUniform, translate_state.render_info_id, { b.makeIntConstant(FRAG_UNIFORM_back_disabled) });
-    b.addDecoration(front_facing, spv::DecorationBuiltIn, spv::BuiltInFrontFacing);
-    translate_state.interfaces.push_back(front_facing);
-
     front_facing = b.createLoad(front_facing, spv::NoPrecision);
 
     spv::Id pred = b.createOp(spv::OpLogicalAnd, booltype, { b.createBinOp(spv::OpFOrdNotEqual, booltype, b.createLoad(front_disabled, spv::NoPrecision), zero), front_facing });

@@ -48,6 +48,9 @@
 #include <util/tracy.h>
 TRACY_MODULE_NAME(SceGxm);
 
+// Precomputed vertex/fragment state applies to every draw once set on the context, not only sceGxmDrawPrecomputed.
+static constexpr bool use_precomputed_state_on_draw = true;
+
 template <>
 std::string to_debug_str<SceGxmColorFormat>(const MemState &mem, SceGxmColorFormat type) {
     switch (type) {
@@ -2328,8 +2331,23 @@ static int gxmDrawElementGeneral(EmuEnvState &emuenv, const char *export_name, c
         return RET_ERROR(SCE_GXM_ERROR_NULL_PROGRAM);
     }
 
-    const SceGxmFragmentProgram &gxm_fragment_program = *context->state.fragment_program.get(emuenv.mem);
-    const SceGxmVertexProgram &gxm_vertex_program = *context->state.vertex_program.get(emuenv.mem);
+    // A precomputed state set on the context overrides program/textures/uniforms for every draw until cleared.
+    SceGxmPrecomputedVertexState *pre_vert = use_precomputed_state_on_draw
+        ? context->state.precomputed_vertex_state.get(emuenv.mem)
+        : nullptr;
+    SceGxmPrecomputedFragmentState *pre_frag = use_precomputed_state_on_draw
+        ? context->state.precomputed_fragment_state.get(emuenv.mem)
+        : nullptr;
+
+    const Ptr<const SceGxmFragmentProgram> frag_program_ptr = (pre_frag && pre_frag->program)
+        ? pre_frag->program
+        : context->state.fragment_program;
+    const Ptr<const SceGxmVertexProgram> vert_program_ptr = (pre_vert && pre_vert->program)
+        ? pre_vert->program
+        : context->state.vertex_program;
+
+    const SceGxmFragmentProgram &gxm_fragment_program = *frag_program_ptr.get(emuenv.mem);
+    const SceGxmVertexProgram &gxm_vertex_program = *vert_program_ptr.get(emuenv.mem);
 
     // Set uniforms
     const SceGxmProgram &vertex_program_gxp = *gxm_vertex_program.program.get(emuenv.mem);
@@ -2337,34 +2355,47 @@ static int gxmDrawElementGeneral(EmuEnvState &emuenv, const char *export_name, c
 
     const void *indices_ptr = indexData.get(emuenv.mem);
 
-    gxmSetUniformBuffers(*emuenv.renderer, emuenv.gxm, context, vertex_program_gxp, context->state.vertex_uniform_buffers, gxm_vertex_program.renderer_data->uniform_buffer_sizes,
+    std::span<UniformBuffer> vert_buffers = (pre_vert && pre_vert->uniform_buffers)
+        ? std::span(pre_vert->uniform_buffers.get(emuenv.mem), pre_vert->buffer_count)
+        : std::span(context->state.vertex_uniform_buffers);
+    std::span<UniformBuffer> frag_buffers = (pre_frag && pre_frag->uniform_buffers)
+        ? std::span(pre_frag->uniform_buffers.get(emuenv.mem), pre_frag->buffer_count)
+        : std::span(context->state.fragment_uniform_buffers);
+
+    gxmSetUniformBuffers(*emuenv.renderer, emuenv.gxm, context, vertex_program_gxp, vert_buffers, gxm_vertex_program.renderer_data->uniform_buffer_sizes,
         emuenv.mem);
-    gxmSetUniformBuffers(*emuenv.renderer, emuenv.gxm, context, fragment_program_gxp, context->state.fragment_uniform_buffers, gxm_fragment_program.renderer_data->uniform_buffer_sizes,
+    gxmSetUniformBuffers(*emuenv.renderer, emuenv.gxm, context, fragment_program_gxp, frag_buffers, gxm_fragment_program.renderer_data->uniform_buffer_sizes,
         emuenv.mem);
 
-    if (context->last_precomputed) {
+    if (context->last_precomputed || pre_vert || pre_frag) {
         // Need to re-set the data
-
-        renderer::set_program(*emuenv.renderer, context->renderer.get(), context->state.vertex_program, false);
-        renderer::set_program(*emuenv.renderer, context->renderer.get(), context->state.fragment_program, true);
+        renderer::set_program(*emuenv.renderer, context->renderer.get(), vert_program_ptr, false);
+        renderer::set_program(*emuenv.renderer, context->renderer.get(), frag_program_ptr, true);
 
         context->last_precomputed = false;
     }
 
-    // set textures that are dirty
-    const gxp::TextureInfo vert_textures_sync = gxm_vertex_program.renderer_data->textures_used & context->is_vert_texture_dirty;
+    // Sync every sampled texture, not only rebound ones. Dirty flags track rebinds, not content changes.
+    const gxp::TextureInfo vert_textures_sync = gxm_vertex_program.renderer_data->textures_used;
     context->is_vert_texture_dirty &= ~vert_textures_sync;
-    const gxp::TextureInfo frag_textures_sync = gxm_fragment_program.renderer_data->textures_used & context->is_frag_texture_dirty;
+    const gxp::TextureInfo frag_textures_sync = gxm_fragment_program.renderer_data->textures_used;
     context->is_frag_texture_dirty &= ~frag_textures_sync;
     const auto &textures = context->state.textures;
+    // Textures also come from the precomputed state when one is bound.
+    const SceGxmTexture *frag_textures = (pre_frag && pre_frag->textures)
+        ? pre_frag->textures.get(emuenv.mem)
+        : textures.data();
+    const SceGxmTexture *vert_textures = (pre_vert && pre_vert->textures)
+        ? pre_vert->textures.get(emuenv.mem)
+        : (textures.data() + SCE_GXM_MAX_TEXTURE_UNITS);
     for (uint16_t texture_index = 0; texture_index < SCE_GXM_MAX_TEXTURE_UNITS; texture_index++) {
         if (vert_textures_sync[texture_index]) {
             const uint16_t index_position = SCE_GXM_MAX_TEXTURE_UNITS + texture_index;
-            renderer::set_texture(*emuenv.renderer, context->renderer.get(), index_position, textures[index_position]);
+            renderer::set_texture(*emuenv.renderer, context->renderer.get(), index_position, vert_textures[texture_index]);
         }
 
         if (frag_textures_sync[texture_index])
-            renderer::set_texture(*emuenv.renderer, context->renderer.get(), texture_index, textures[texture_index]);
+            renderer::set_texture(*emuenv.renderer, context->renderer.get(), texture_index, frag_textures[texture_index]);
     }
 
     // Update vertex data. We should stores a copy of the data to pass it to GPU later, since another scene
@@ -2917,8 +2948,9 @@ EXPORT(int, sceGxmMapMemory, Ptr<void> base, uint32_t size, uint32_t attribs) {
         gxm.memory_mapped_regions.emplace(aligned_base, MemoryMapInfo{ aligned_base, size, attribs });
 
         // little big planet maps regions of size 0
+        // thread_id lets the renderer's stop-the-world handler exclude this blocked caller from its wait.
         if (emuenv.renderer->features.enable_memory_mapping && size > 0)
-            renderer::send_single_command(*emuenv.renderer, nullptr, renderer::CommandOpcode::MemoryMap, true, aligned_base, size);
+            renderer::send_single_command(*emuenv.renderer, nullptr, renderer::CommandOpcode::MemoryMap, true, aligned_base, size, static_cast<uint32_t>(thread_id));
 
         return 0;
     }
@@ -5386,8 +5418,15 @@ EXPORT(int, sceGxmTextureSetUAddrModeSafe, SceGxmTexture *texture, SceGxmTexture
     if (!texture)
         return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
 
-    if (!verify_texture_mode(texture, mode))
+    if (!verify_texture_mode(texture, mode)) {
+        // Cube textures only support CLAMP on hardware, but some titles (COD:Declassified) set REPEAT/MIRROR — coerce.
+        if ((texture->type << 29) == SCE_GXM_TEXTURE_CUBE || (texture->type << 29) == SCE_GXM_TEXTURE_CUBE_ARBITRARY) {
+            LOG_WARN_ONCE("Cube texture U addr mode {} unsupported — coercing to CLAMP", fmt::underlying(mode));
+            texture->uaddr_mode = SCE_GXM_TEXTURE_ADDR_CLAMP;
+            return 0;
+        }
         return RET_ERROR(SCE_GXM_ERROR_UNSUPPORTED);
+    }
 
     texture->uaddr_mode = mode;
     return 0;
@@ -5410,8 +5449,15 @@ EXPORT(int, sceGxmTextureSetVAddrModeSafe, SceGxmTexture *texture, SceGxmTexture
     if (!texture)
         return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
 
-    if (!verify_texture_mode(texture, mode))
+    if (!verify_texture_mode(texture, mode)) {
+        // See sceGxmTextureSetUAddrModeSafe: coerce unsupported cube addr modes to CLAMP.
+        if ((texture->type << 29) == SCE_GXM_TEXTURE_CUBE || (texture->type << 29) == SCE_GXM_TEXTURE_CUBE_ARBITRARY) {
+            LOG_WARN_ONCE("Cube texture V addr mode {} unsupported — coercing to CLAMP", fmt::underlying(mode));
+            texture->vaddr_mode = SCE_GXM_TEXTURE_ADDR_CLAMP;
+            return 0;
+        }
         return RET_ERROR(SCE_GXM_ERROR_UNSUPPORTED);
+    }
 
     texture->vaddr_mode = mode;
     return 0;
@@ -5683,8 +5729,9 @@ EXPORT(int, sceGxmUnmapMemory, Ptr<void> base) {
         *addr = *addr;
     }
 
+    // The renderer-side handler stops the world for the transition (see creation.cpp).
     if (emuenv.renderer->features.enable_memory_mapping && ite->second.size > 0)
-        renderer::send_single_command(*emuenv.renderer, nullptr, renderer::CommandOpcode::MemoryUnmap, true, aligned_base);
+        renderer::send_single_command(*emuenv.renderer, nullptr, renderer::CommandOpcode::MemoryUnmap, true, aligned_base, static_cast<uint32_t>(thread_id));
 
     emuenv.gxm.memory_mapped_regions.erase(ite);
     return 0;

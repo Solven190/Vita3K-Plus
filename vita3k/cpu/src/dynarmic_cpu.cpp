@@ -34,6 +34,15 @@
 #include <optional>
 #include <string>
 
+// Log the first few invalid guest accesses in full, then suppress (a guest null-deref loop can log GBs).
+static bool should_log_invalid_access() {
+    static std::atomic<uint64_t> count{ 0 };
+    const uint64_t n = count.fetch_add(1, std::memory_order_relaxed);
+    if (n == 8)
+        LOG_ERROR("Further invalid guest memory accesses will be suppressed (guest likely spinning on a bad pointer)");
+    return n < 8;
+}
+
 static std::uint64_t coproc_noop(void *, std::uint32_t, std::uint32_t) {
     return 0;
 }
@@ -181,7 +190,23 @@ public:
             LOG_TRACE("Instruction fetch at address 0x{:X}", addr);
         const Ptr<uint32_t> ptr{ static_cast<Address>(addr) };
         if (!ptr || !ptr.valid(*parent->mem) || ptr.address() < parent->mem->host_page_size) {
-            LOG_CRITICAL("Invalid instruction fetch at address 0x{:X}\n{}", addr, cpu->save_context().description());
+            uint32_t bc_nid = 0, bc_lr = 0;
+            get_last_import_call(bc_nid, bc_lr);
+            LOG_CRITICAL("Invalid instruction fetch at address 0x{:X} (last HLE import on this thread: nid=0x{:X} called from LR=0x{:X})\n{}", addr, bc_nid, bc_lr, cpu->save_context().description());
+            // Disassemble the code before LR: it shows where the (bad) branch target was loaded from.
+            const uint32_t lr_raw = read_lr(*parent);
+            const bool thumb_caller = (lr_raw & 1) != 0;
+            const uint32_t lr = lr_raw & ~1u;
+            if (lr >= parent->mem->host_page_size) {
+                std::string window;
+                uint32_t a = lr - 64;
+                while (a <= lr + 2 && Ptr<uint32_t>{ a }.valid(*parent->mem)) {
+                    uint16_t insn_size = 2;
+                    window += fmt::format("  0x{:X}: {}\n", a, disassemble(*parent, a, thumb_caller, &insn_size));
+                    a += insn_size ? insn_size : 2;
+                }
+                LOG_CRITICAL("Code before the call site (LR-64..LR, thumb={}):\n{}", thumb_caller, window);
+            }
             return std::nullopt;
         }
         return MemoryRead32(addr);
@@ -263,13 +288,15 @@ public:
     T MemoryRead(Dynarmic::A32::VAddr addr) {
         Ptr<T> ptr{ addr };
         if (!ptr || !ptr.valid(*parent->mem) || ptr.address() < parent->mem->host_page_size) {
-            LOG_ERROR("Invalid read of uint{}_t at address: 0x{:x}\n{}", sizeof(T) * 8, addr, this->cpu->save_context().description());
+            if (should_log_invalid_access()) {
+                LOG_ERROR("Invalid read of uint{}_t at address: 0x{:x}\n{}", sizeof(T) * 8, addr, this->cpu->save_context().description());
 
-            auto pc = this->cpu->get_pc();
-            if (pc < parent->mem->host_page_size)
-                LOG_CRITICAL("PC is 0x{:x}", pc);
-            else
-                LOG_ERROR("Executing: {}", disassemble(*parent, pc, nullptr));
+                auto pc = this->cpu->get_pc();
+                if (pc < parent->mem->host_page_size)
+                    LOG_CRITICAL("PC is 0x{:x}", pc);
+                else
+                    LOG_ERROR("Executing: {}", disassemble(*parent, pc, nullptr));
+            }
             return 0;
         }
 
@@ -300,13 +327,15 @@ public:
     void MemoryWrite(Dynarmic::A32::VAddr addr, T value) {
         Ptr<T> ptr{ addr };
         if (!ptr || !ptr.valid(*parent->mem) || ptr.address() < parent->mem->host_page_size) {
-            LOG_ERROR("Invalid write of uint{}_t at addr: 0x{:x}, val = 0x{:x}\n{}", sizeof(T) * 8, addr, value, this->cpu->save_context().description());
+            if (should_log_invalid_access()) {
+                LOG_ERROR("Invalid write of uint{}_t at addr: 0x{:x}, val = 0x{:x}\n{}", sizeof(T) * 8, addr, value, this->cpu->save_context().description());
 
-            auto pc = this->cpu->get_pc();
-            if (pc < parent->mem->host_page_size)
-                LOG_CRITICAL("PC is 0x{:x}", pc);
-            else
-                LOG_ERROR("Executing: {}", disassemble(*parent, pc, nullptr));
+                auto pc = this->cpu->get_pc();
+                if (pc < parent->mem->host_page_size)
+                    LOG_CRITICAL("PC is 0x{:x}", pc);
+                else
+                    LOG_ERROR("Executing: {}", disassemble(*parent, pc, nullptr));
+            }
             return;
         }
 
@@ -336,13 +365,15 @@ public:
     bool MemoryWriteExclusive(Dynarmic::A32::VAddr addr, T value, T expected) {
         Ptr<T> ptr{ addr };
         if (!ptr || !ptr.valid(*parent->mem) || ptr.address() < parent->mem->host_page_size) {
-            LOG_ERROR("Invalid exclusive write of uint{}_t at addr: 0x{:x}, val = 0x{:x}, expected = 0x{:x}\n{}", sizeof(T) * 8, addr, value, expected, this->cpu->save_context().description());
+            if (should_log_invalid_access()) {
+                LOG_ERROR("Invalid exclusive write of uint{}_t at addr: 0x{:x}, val = 0x{:x}, expected = 0x{:x}\n{}", sizeof(T) * 8, addr, value, expected, this->cpu->save_context().description());
 
-            auto pc = this->cpu->get_pc();
-            if (pc < parent->mem->host_page_size)
-                LOG_CRITICAL("PC is 0x{:x}", pc);
-            else
-                LOG_ERROR("Executing: {}", disassemble(*parent, pc, nullptr));
+                auto pc = this->cpu->get_pc();
+                if (pc < parent->mem->host_page_size)
+                    LOG_CRITICAL("PC is 0x{:x}", pc);
+                else
+                    LOG_ERROR("Executing: {}", disassemble(*parent, pc, nullptr));
+            }
             return false;
         }
 

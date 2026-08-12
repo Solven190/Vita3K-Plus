@@ -18,8 +18,10 @@
 #pragma once
 
 #include <renderer/texture_cache.h>
+
 #include <renderer/types.h>
 #include <shader/uniform_block.h>
+#include <unordered_map>
 #include <vkutil/objects.h>
 
 struct MemState;
@@ -73,6 +75,9 @@ struct VKTextureCache : public TextureCache {
     void upload_texture_impl(SceGxmTextureBaseFormat base_format, uint32_t width, uint32_t height, uint32_t mip_index, const void *pixels, int face, uint32_t pixels_per_stride) override;
     void upload_done() override;
     void configure_sampler(size_t index, const SceGxmTexture &texture, bool no_linear) override;
+
+    bool format_supports_linear_filter(vk::Format format);
+    std::unordered_map<VkFormat, bool> linear_filter_support_cache;
 
     void import_configure_impl(SceGxmTextureBaseFormat base_format, uint32_t width, uint32_t height, bool is_srgb, uint16_t nb_components, uint16_t mipcount, bool swap_rb) override;
 
@@ -198,6 +203,8 @@ struct CallbackRequest {
     // use a pointer so the size is similar to other elements of WaitThreadRequest
     // and not to have to mess with move semantics
     CallbackRequestFunction *callback;
+    // when true, the wait thread drains all pending GPU fences before firing the callback
+    bool wait_for_gpu = false;
 };
 
 // only used with the DoubleBuffer Method

@@ -216,6 +216,59 @@ void KernelState::resume_threads() {
     paused_threads_status.clear();
 }
 
+int KernelState::stop_world(SceUID except_id, std::chrono::milliseconds budget) {
+    {
+        const std::lock_guard<std::mutex> lock(mutex);
+        world_stopped_threads.clear();
+        world_stopped_threads.reserve(threads.size());
+        for (auto &[tid, thread] : threads) {
+            if (tid != except_id)
+                world_stopped_threads.push_back(thread);
+        }
+    }
+
+    // Phase 1: flag + halt everyone first (halts latch, so none is lost)...
+    for (const auto &thread : world_stopped_threads)
+        thread->request_world_stop();
+
+    // Phase 2: ...then wait for each to be provably outside the JIT, on a shared deadline.
+    const auto deadline = std::chrono::steady_clock::now() + budget;
+    int not_parked = 0;
+    for (const auto &thread : world_stopped_threads) {
+        if (!thread->wait_world_stopped(deadline))
+            ++not_parked;
+    }
+    return not_parked;
+}
+
+void KernelState::log_thread_hang_dump() {
+    std::vector<ThreadStatePtr> snapshot;
+    {
+        const std::lock_guard<std::mutex> lock(mutex);
+        for (auto &[tid, t] : threads)
+            snapshot.push_back(t);
+    }
+    LOG_ERROR("HANG DUMP: {} guest thread(s)", snapshot.size());
+    for (const auto &t : snapshot) {
+        const ThreadStatus status = t->status;
+        const char *status_str = (status == ThreadStatus::run) ? "run" : (status == ThreadStatus::wait) ? "wait"
+            : (status == ThreadStatus::suspend)                        ? "suspend"
+                                                                       : "dormant";
+        if (status == ThreadStatus::run) {
+            LOG_ERROR("HANG DUMP: thread {} ({}) status=run (executing or blocked inside an HLE import)", t->name, t->id);
+        } else {
+            LOG_ERROR("HANG DUMP: thread {} ({}) status={} PC=0x{:X} LR=0x{:X} stack:\n{}",
+                t->name, t->id, status_str, read_pc(*t->cpu), read_lr(*t->cpu), t->log_stack_traceback());
+        }
+    }
+}
+
+void KernelState::resume_world() {
+    for (const auto &thread : world_stopped_threads)
+        thread->resume_from_world();
+    world_stopped_threads.clear();
+}
+
 void KernelState::deinit(MemState &mem) {
     process_exit();
     threads.clear();

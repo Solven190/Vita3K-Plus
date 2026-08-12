@@ -1797,7 +1797,7 @@ SceSize msgpipe_recv(KernelState &kernel, const char *export_name, SceUID thread
             return finish();
         } else { // There's a timeout - wait until we can fill buffer or timeout
             msgpipe_lock.unlock(); // Unlock message pipe object, else we'll deadlock
-            auto status = thread->status_cond.wait_for(thread_lock, std::chrono::microseconds{ *pTimeout }, [&] {
+            thread->status_cond.wait_for(thread_lock, std::chrono::microseconds{ *pTimeout }, [&] {
                 return thread->status == ThreadStatus::run;
             });
             if (msgpipe->beingDeleted) {
@@ -1805,12 +1805,21 @@ SceSize msgpipe_recv(KernelState &kernel, const char *export_name, SceUID thread
                 return SCE_KERNEL_ERROR_WAIT_DELETE;
             }
 
-            if (!status) { // Timed out and buffer hasn't been touched
-                thread->update_status(ThreadStatus::run, ThreadStatus::wait);
-                return RET_ERROR(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
+            thread_lock.unlock();
+            msgpipe_lock.lock();
+            thread_lock.lock();
+
+            availableSize = msgpipe->data_buffer.Used();
+            if ((availableSize >= recvSize) || (ASAP && (availableSize > 0)))
+                return finish();
+
+            {
+                auto it = msgpipe->receivers->find(thread);
+                if (it != msgpipe->receivers->end())
+                    msgpipe->receivers->erase(it);
             }
-            msgpipe_lock.lock(); // Lock message pipe again
-            return finish();
+            thread->update_status(ThreadStatus::run);
+            return RET_ERROR(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
         }
     }
 }
@@ -1927,7 +1936,7 @@ SceSize msgpipe_send(KernelState &kernel, const char *export_name, SceUID thread
             return finish();
         } else { // There's a timeout - wait until we can fill buffer or timeout
             msgpipe_lock.unlock(); // Unlock message pipe object, else we'll deadlock
-            auto status = thread->status_cond.wait_for(thread_lock, std::chrono::microseconds{ *pTimeout }, [&] {
+            thread->status_cond.wait_for(thread_lock, std::chrono::microseconds{ *pTimeout }, [&] {
                 return thread->status == ThreadStatus::run;
             });
             if (msgpipe->beingDeleted) {
@@ -1935,12 +1944,21 @@ SceSize msgpipe_send(KernelState &kernel, const char *export_name, SceUID thread
                 return SCE_KERNEL_ERROR_WAIT_DELETE;
             }
 
-            if (!status) { // Timed out and buffer hasn't been touched
-                thread->update_status(ThreadStatus::run, ThreadStatus::wait);
-                return RET_ERROR(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
+            thread_lock.unlock();
+            msgpipe_lock.lock();
+            thread_lock.lock();
+
+            freeSize = msgpipe->data_buffer.Free();
+            if ((freeSize >= sendSize) || (ASAP && (freeSize >= 1)))
+                return finish();
+
+            {
+                auto it = msgpipe->senders->find(thread);
+                if (it != msgpipe->senders->end())
+                    msgpipe->senders->erase(it);
             }
-            msgpipe_lock.lock(); // Lock message pipe before read from data_buffer in finish()
-            return finish();
+            thread->update_status(ThreadStatus::run);
+            return RET_ERROR(SCE_KERNEL_ERROR_WAIT_TIMEOUT);
         }
     }
 }

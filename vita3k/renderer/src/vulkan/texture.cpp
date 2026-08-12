@@ -125,8 +125,8 @@ void sync_texture(VKContext &context, MemState &mem, std::size_t index, SceGxmTe
     }
 
     if (lookup_result.has_value()) {
-        // get the sampler now
-        context.state.texture_cache.cache_and_bind_sampler(texture, is_depth_surface);
+        const bool needs_nearest = !context.state.texture_cache.format_supports_linear_filter(lookup_result->format);
+        context.state.texture_cache.cache_and_bind_sampler(texture, needs_nearest);
     } else {
         context.state.texture_cache.cache_and_bind_texture(texture, mem);
         auto &image = context.state.texture_cache.current_texture->texture;
@@ -165,6 +165,9 @@ void sync_texture(VKContext &context, MemState &mem, std::size_t index, SceGxmTe
             context.curr_frag_ublock.set_viewport_offset(index, texture_viewport.offset);
         }
     }
+
+    if (!is_vertex)
+        context.curr_frag_ublock.set_cast_sampler_bit(index, lookup_result->is_typeless_cast, lookup_result->cast_phase_hi);
 }
 
 void VKTextureCache::prepare_staging_buffer(bool is_configure) {
@@ -553,6 +556,18 @@ void VKTextureCache::upload_done() {
     // this should not be necessary
     cmd_buffer = nullptr;
     is_texture_transfer_ready = false;
+}
+
+bool VKTextureCache::format_supports_linear_filter(vk::Format format) {
+    auto it = linear_filter_support_cache.find(static_cast<VkFormat>(format));
+    if (it != linear_filter_support_cache.end())
+        return it->second;
+    const vk::FormatProperties props = state.physical_device.getFormatProperties(format);
+    const bool supported = static_cast<bool>(props.optimalTilingFeatures & vk::FormatFeatureFlagBits::eSampledImageFilterLinear);
+    linear_filter_support_cache[static_cast<VkFormat>(format)] = supported;
+    if (!supported)
+        LOG_INFO("format {} lacks linear-filter support: samplers for it will use nearest", vk::to_string(format));
+    return supported;
 }
 
 void VKTextureCache::configure_sampler(size_t index, const SceGxmTexture &texture, bool no_linear) {

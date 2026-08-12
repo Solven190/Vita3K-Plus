@@ -160,6 +160,8 @@ void call_import(EmuEnvState &emuenv, CPUState &cpu, uint32_t nid, SceUID thread
         auto lr = read_lr(cpu);
         log_import_call('H', nid, thread_id, hle_nid_blacklist, lr);
     }
+    set_last_import_call(nid, read_lr(cpu));
+
     const ImportFn *fn = resolve_import(nid);
     if (fn) {
         (*fn)(emuenv, cpu, thread_id);

@@ -75,6 +75,19 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
                 }
             }
         }
+        // Hang watchdog: no framebuffer flip for ~10s (600 vblanks) while unpaused -> dump guest threads once per stall.
+        {
+            static uint64_t last_dumped_setframe = ~0ull;
+            const uint64_t setframe = emuenv.display.last_setframe_vblank_count.load();
+            const uint64_t vblanks = emuenv.display.vblank_count.load();
+            if (setframe > 0 && vblanks > setframe && (vblanks - setframe) > 600
+                && !emuenv.kernel.is_threads_paused() && last_dumped_setframe != setframe) {
+                last_dumped_setframe = setframe; // one dump per distinct stall
+                LOG_ERROR("HANG WATCHDOG: no framebuffer flip for {} vblanks — dumping guest threads", vblanks - setframe);
+                emuenv.kernel.log_thread_hang_dump();
+            }
+        }
+
         const auto time_ms = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
         const auto time_left = TARGET_MICRO_PER_FRAME - (time_ms % TARGET_MICRO_PER_FRAME);
         std::this_thread::sleep_for(std::chrono::microseconds(time_left));

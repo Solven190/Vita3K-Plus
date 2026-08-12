@@ -23,6 +23,7 @@
 #include <mem/block.h>
 #include <mem/ptr.h>
 
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <optional>
@@ -111,6 +112,12 @@ struct ThreadState {
     void suspend_and_wait();
     void resume(bool step = false);
     void resume_if_suspended();
+
+    // Stop-the-world support: distinct from suspend()/vm_suspended so they cannot cancel each other
+    void request_world_stop();
+    bool wait_world_stopped(std::chrono::steady_clock::time_point deadline);
+    bool resume_from_world();
+
     std::string log_stack_traceback() const;
 
 private:
@@ -128,6 +135,9 @@ private:
     bool suspend_requested = false;
     // Suspended by sceKernelSuspendThreadForVM
     bool vm_suspended = false;
+    // Stop-the-world
+    bool world_stop_requested = false;
+    bool world_stopped = false;
     // Single stepping mode.
     bool single_stepping = false;
 

@@ -555,8 +555,11 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_color_surface_for_framebuffer(Mem
         // deferred destruction of the existing surface
         destroy_surface(info_added);
     }
+    const bool reused_for_other_store = info_added.data && info_added.data.address() != address;
     if (info_added.data)
         color_address_lookup.erase(info_added.data.address());
+    if (reused_for_other_store)
+        info_added.has_phase_view = false;
 
     color_surface_queue.set_as_mru(&info_added);
     info_added.last_frame_rendered = context->frame_timestamp;
@@ -750,11 +753,21 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
         return std::nullopt;
     }
 
+    const bool is_typeless_cast = bytes_per_pixel_requested != bytes_per_pixel_in_store;
+
     // TODO: this is true only for linear textures (and also kind of for tiled textures) (and in this case start_x = 0),
     // for swizzled textures this is different
     const uint32_t data_delta = address - ite->first;
     uint32_t start_sourced_line = static_cast<uint32_t>((data_delta / stride_bytes) * state.res_multiplier);
     uint32_t start_x = static_cast<uint32_t>((data_delta % stride_bytes) / bytes_per_pixel_requested * state.res_multiplier);
+
+    const bool cast_phase_hi = is_typeless_cast && bytes_per_pixel_in_store != 0 && bytes_per_pixel_requested != 0
+        && (((data_delta % stride_bytes) % bytes_per_pixel_in_store) / bytes_per_pixel_requested) != 0;
+    if (cast_phase_hi && !info.has_phase_view) {
+        info.has_phase_view = true;
+        for (CastedTexture &casted_texture : info.casted_textures)
+            casted_texture.scene_timestamp = 0;
+    }
 
     if (static_cast<uint16_t>(start_sourced_line + height) > info.height)
         LOG_WARN_ONCE("Trying to use texture partially in the surface cache");
@@ -845,7 +858,9 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
                     return TextureLookupResult{
                         use_alt_view ? casted->alt_gamma_view : casted->texture.view,
                         vkutil::ImageLayout::SampledImage,
-                        use_alt_view ? (base_is_srgb ? vk::Format::eR8G8B8A8Unorm : vk::Format::eR8G8B8A8Srgb) : casted->texture.format
+                        use_alt_view ? (base_is_srgb ? vk::Format::eR8G8B8A8Unorm : vk::Format::eR8G8B8A8Srgb) : casted->texture.format,
+                        is_typeless_cast && !info.has_phase_view,
+                        cast_phase_hi
                     };
                 }
 
@@ -971,6 +986,17 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
                     .dstSubresource = vkutil::color_subresource_layer,
                     .dstOffsets = std::array<vk::Offset3D, 2>{ vk::Offset3D{ 0, 0, 0 }, vk::Offset3D{ dst_w, dst_h, 1 } }
                 };
+                vk::ImageMemoryBarrier src_barrier{
+                    .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite | vk::AccessFlagBits::eShaderWrite,
+                    .dstAccessMask = vk::AccessFlagBits::eTransferRead,
+                    .oldLayout = vk::ImageLayout::eGeneral,
+                    .newLayout = vk::ImageLayout::eGeneral,
+                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .image = info.texture.image,
+                    .subresourceRange = vkutil::color_subresource_range
+                };
+                cmd_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eFragmentShader, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, src_barrier);
                 cmd_buffer.blitImage(info.texture.image, vk::ImageLayout::eGeneral, casted->texture.image, vk::ImageLayout::eTransferDstOptimal, blit, vk::Filter::eLinear);
             } else {
                 LOG_INFO_ONCE("Game is doing typeless copies");
@@ -1048,7 +1074,8 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
                         .scaled_store_w = info.texture.width,
                         .scaled_store_h = info.texture.height,
                         .ratio = ratio,
-                        .half_index = half_index
+                        .half_index = half_index,
+                        .interleave = (!info.has_phase_view && width == ratio * info.texture.width) ? 1u : 0u
                     };
                     cmd_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, reinterpret_pipeline);
                     cmd_buffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, reinterpret_pipeline_layout, 0, dset, {});
@@ -1091,7 +1118,18 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
                         .subresourceRange = vkutil::color_subresource_range
                     };
                     cmd_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eFragmentShader, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, img_barrier);
-                    cmd_buffer.copyImageToBuffer(byte_src, byte_use_raw ? vk::ImageLayout::eGeneral : vk::ImageLayout::eTransferSrcOptimal, casted->transition_buffer.buffer, copy_image_buffer);
+                    cmd_buffer.copyImageToBuffer(byte_src, vk::ImageLayout::eGeneral, casted->transition_buffer.buffer, copy_image_buffer);
+
+                    vk::BufferMemoryBarrier buf_barrier{
+                        .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+                        .dstAccessMask = vk::AccessFlagBits::eTransferRead,
+                        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                        .buffer = casted->transition_buffer.buffer,
+                        .offset = 0,
+                        .size = VK_WHOLE_SIZE
+                    };
+                    cmd_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eTransfer, {}, {}, buf_barrier, {});
 
                     copy_image_buffer
                         .setBufferOffset(src_byte_offset)
@@ -1111,7 +1149,9 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
         return TextureLookupResult{
             use_alt_view ? casted->alt_gamma_view : casted->texture.view,
             vkutil::ImageLayout::SampledImage,
-            use_alt_view ? (base_is_srgb ? vk::Format::eR8G8B8A8Unorm : vk::Format::eR8G8B8A8Srgb) : casted->texture.format
+            use_alt_view ? (base_is_srgb ? vk::Format::eR8G8B8A8Unorm : vk::Format::eR8G8B8A8Srgb) : casted->texture.format,
+            is_typeless_cast && !info.has_phase_view,
+            cast_phase_hi
         };
     } else {
         // the renderpass external dependencies should take care of the barrier
@@ -1167,6 +1207,80 @@ bool VKSurfaceCache::begin_ds_scene_depth_check(const SceGxmDepthStencilSurface 
     cached_info->last_scene_color_addr = scene_color_addr;
 
     return cached_info->depth_content_stored || is_continuation;
+}
+
+bool VKSurfaceCache::try_transfer_depth_gpu(Address src_address, Address dst_address, uint32_t width, uint32_t height) {
+    if (src_address == dst_address)
+        return false;
+
+    auto src_it = depth_address_lookup.find(src_address);
+    auto dst_it = depth_address_lookup.find(dst_address);
+    if (src_it == depth_address_lookup.end() || dst_it == depth_address_lookup.end())
+        return false;
+    if (color_address_lookup.contains(src_address) || color_address_lookup.contains(dst_address))
+        return false;
+
+    DepthStencilSurfaceCacheInfo *src_info = src_it->second;
+    DepthStencilSurfaceCacheInfo *dst_info = dst_it->second;
+    if (src_info == nullptr || dst_info == nullptr || src_info == dst_info)
+        return false;
+    if (!src_info->texture.image || !dst_info->texture.image)
+        return false;
+
+    const uint32_t scaled_width = static_cast<uint32_t>(width * state.res_multiplier);
+    const uint32_t scaled_height = static_cast<uint32_t>(height * state.res_multiplier);
+    const uint32_t copy_width = std::min({ scaled_width, src_info->texture.width, dst_info->texture.width });
+    const uint32_t copy_height = std::min({ scaled_height, src_info->texture.height, dst_info->texture.height });
+    if (copy_width == 0 || copy_height == 0)
+        return false;
+
+    vk::CommandBuffer transfer_cmd = nullptr;
+    vk::Fence fence = state.device.createFence({});
+    {
+        std::lock_guard<std::mutex> lock(state.multithread_pool_mutex);
+        transfer_cmd = vkutil::create_single_time_command(state.device, state.multithread_command_pool);
+
+        src_info->texture.transition_to(transfer_cmd, vkutil::ImageLayout::TransferSrc, vkutil::ds_subresource_range);
+        dst_info->texture.transition_to_discard(transfer_cmd, vkutil::ImageLayout::TransferDst, vkutil::ds_subresource_range);
+
+        vk::ImageSubresourceLayers layers = vkutil::color_subresource_layer;
+        layers.aspectMask = vk::ImageAspectFlagBits::eDepth | vk::ImageAspectFlagBits::eStencil;
+        vk::ImageCopy image_copy{
+            .srcSubresource = layers,
+            .srcOffset = { 0, 0, 0 },
+            .dstSubresource = layers,
+            .dstOffset = { 0, 0, 0 },
+            .extent = { copy_width, copy_height, 1U }
+        };
+        transfer_cmd.copyImage(src_info->texture.image, vk::ImageLayout::eTransferSrcOptimal, dst_info->texture.image, vk::ImageLayout::eTransferDstOptimal, image_copy);
+
+        src_info->texture.transition_to(transfer_cmd, vkutil::ImageLayout::DepthStencilReadOnly, vkutil::ds_subresource_range);
+        dst_info->texture.transition_to(transfer_cmd, vkutil::ImageLayout::DepthStencilReadOnly, vkutil::ds_subresource_range);
+
+        transfer_cmd.end();
+    }
+
+    vk::SubmitInfo submit_info{};
+    submit_info.setCommandBuffers(transfer_cmd);
+    state.general_queue.submit(submit_info, fence);
+
+    dst_info->depth_content_stored = true;
+
+    CallbackRequestFunction vk_callback = [&state = this->state, fence, transfer_cmd]() {
+        const auto result = state.device.waitForFences(fence, vk::True, std::numeric_limits<uint64_t>::max());
+        if (result != vk::Result::eSuccess)
+            LOG_ERROR("Could not wait for the depth transfer fence.");
+
+        state.device.destroyFence(fence);
+
+        std::lock_guard<std::mutex> lock(state.multithread_pool_mutex);
+        state.device.freeCommandBuffers(state.multithread_command_pool, transfer_cmd);
+    };
+    state.request_queue.push(CallbackRequest{ new CallbackRequestFunction(std::move(vk_callback)) });
+
+    LOG_INFO_ONCE("Depth transfer done on the GPU: 0x{:08X} -> 0x{:08X} {}x{} (scaled {}x{})", src_address, dst_address, width, height, copy_width, copy_height);
+
+    return true;
 }
 
 void VKSurfaceCache::resolve_ds_scene_end(bool scene_wrote_depth) {
@@ -1832,6 +1946,20 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
     const vk::Format sync_format = sync_from_raw ? vk::Format::eR16G16B16A16Uint : last_written_surface->texture.format;
     vk::ImageLayout image_layout = vk::ImageLayout::eGeneral;
 
+    {
+        vk::ImageMemoryBarrier sync_src_barrier{
+            .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite | vk::AccessFlagBits::eShaderWrite,
+            .dstAccessMask = vk::AccessFlagBits::eTransferRead,
+            .oldLayout = vk::ImageLayout::eGeneral,
+            .newLayout = vk::ImageLayout::eGeneral,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = image_to_copy,
+            .subresourceRange = vkutil::color_subresource_range
+        };
+        cmd_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eFragmentShader, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, sync_src_barrier);
+    }
+
     // this works for surface swizzles
     bool is_swizzle_identity = last_written_surface->swizzle.r == vk::ComponentSwizzle::eR;
     if (!is_swizzle_identity && !format_support_swizzle(last_written_surface->format)) {
@@ -2082,7 +2210,7 @@ void VKSurfaceCache::destroy_associated_framebuffers(const VKRenderTarget *rende
     destroy_framebuffers(render_target->depthstencil.view);
 }
 
-vk::ImageView VKSurfaceCache::sourcing_color_surface_for_presentation(Ptr<const void> address, uint32_t pitch, Viewport &viewport) {
+vk::ImageView VKSurfaceCache::sourcing_color_surface_for_presentation(Ptr<const void> address, uint32_t pitch, Viewport &viewport, PresentSurfaceInfo *present_info) {
     // get closest surface with an address below address
     auto ite = color_address_lookup.upper_bound(address.address());
     if (ite == color_address_lookup.begin()) {
@@ -2119,6 +2247,11 @@ vk::ImageView VKSurfaceCache::sourcing_color_surface_for_presentation(Ptr<const 
             viewport.height = limited_height;
             viewport.texture_width = info.width;
             viewport.texture_height = info.height;
+
+            if (present_info) {
+                present_info->image = info.texture.image;
+                present_info->plain_rgba8 = (info.swizzle == vkutil::rgba_mapping && info.texture.format == vk::Format::eR8G8B8A8Unorm);
+            }
 
             if (info.swizzle == vkutil::rgba_mapping && info.texture.format == vk::Format::eR8G8B8A8Unorm)
                 return info.texture.view;
@@ -2184,6 +2317,11 @@ std::vector<uint32_t> VKSurfaceCache::dump_frame(Ptr<const void> address, uint32
 
     // this will cause a waitIdle, not an issue
     vkutil::end_single_time_command(state.device, state.general_queue, state.general_command_pool, cmd_buffer);
+
+    // on non-coherent staging memory the CPU would read stale data without an explicit invalidate
+    const vk::MemoryPropertyFlags dump_mem_props = state.allocator.getAllocationMemoryProperties(temp_buff.allocation);
+    if (!(dump_mem_props & vk::MemoryPropertyFlagBits::eHostCoherent))
+        state.allocator.invalidateAllocation(temp_buff.allocation, 0, VK_WHOLE_SIZE);
 
     memcpy(frame.data(), temp_buff.mapped_data, frame.size() * 4);
 

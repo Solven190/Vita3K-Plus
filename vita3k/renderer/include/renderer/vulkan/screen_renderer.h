@@ -58,10 +58,8 @@ public:
     vk::RenderPass default_render_pass;
     // renderpass used after a post-processing pass clearing the swapchain, compatible with the default render pass
     vk::RenderPass post_filter_render_pass;
-#ifdef __ANDROID__
     // renderpass used to (partially) prevent a driver bug using stock adreno drivers
     vk::RenderPass stock_adreno_pass;
-#endif
 
     std::unique_ptr<ScreenFilter> filter;
 
@@ -78,6 +76,9 @@ public:
     int current_frame = 0;
     // set when the swapchain needs to be rebuilt before the next acquire
     bool need_rebuild = false;
+    // the swapchain images were created with eTransferDst (required by render_transfer)
+    bool support_swapchain_transfer_dst = false;
+
     // set when we also need to recreate the surface before rebuilding swapchain
     bool need_surface_recreate = false;
 

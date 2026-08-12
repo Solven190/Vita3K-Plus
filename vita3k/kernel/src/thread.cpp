@@ -263,6 +263,12 @@ void ThreadState::run_loop() {
 
         // Active JIT loop. Lock held on entry and exit; unlocked only around run/step.
         while (!delete_requested && !exit_requested && !guest_returned && status == ThreadStatus::run) {
+            if (world_stop_requested) {
+                world_stopped = true;
+                update_status(ThreadStatus::suspend);
+                continue;
+            }
+
             const bool do_step = single_stepping;
             if (do_step)
                 single_stepping = false;
@@ -285,8 +291,10 @@ void ThreadState::run_loop() {
 
             lock.lock();
 
-            if (do_step || suspend_requested || vm_suspended || hit_breakpoint(*cpu)) {
+            if (do_step || suspend_requested || vm_suspended || world_stop_requested || hit_breakpoint(*cpu)) {
                 suspend_requested = false;
+                if (world_stop_requested)
+                    world_stopped = true;
                 update_status(ThreadStatus::suspend);
             }
 
@@ -467,6 +475,38 @@ void ThreadState::resume_if_suspended() {
     suspend_requested = false;
     if (status == ThreadStatus::suspend)
         update_status(ThreadStatus::run);
+}
+
+void ThreadState::request_world_stop() {
+    std::unique_lock<std::mutex> lock(mutex);
+    world_stop_requested = true;
+
+    if (status != ThreadStatus::run)
+        return;
+
+    suspend_requested = true;
+    lock.unlock();
+    stop(*cpu);
+}
+
+bool ThreadState::wait_world_stopped(std::chrono::steady_clock::time_point deadline) {
+    std::unique_lock<std::mutex> lock(mutex);
+    return status_cond.wait_until(lock, deadline, [&] { return status != ThreadStatus::run || delete_requested; });
+}
+
+bool ThreadState::resume_from_world() {
+    const std::lock_guard<std::mutex> lock(mutex);
+    world_stop_requested = false;
+    suspend_requested = false;
+    if (world_stopped) {
+        world_stopped = false;
+        // Only wake threads WE parked; leave ForVM/debugger suspensions untouched.
+        if (status == ThreadStatus::suspend && !vm_suspended) {
+            update_status(ThreadStatus::run);
+            return true;
+        }
+    }
+    return false;
 }
 
 std::string ThreadState::log_stack_traceback() const {

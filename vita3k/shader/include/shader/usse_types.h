@@ -388,6 +388,9 @@ struct AttributeInputSource {
     bool regformat;
 };
 
+// Face-flag register index in the USSE GLOBAL bank (non-zero = front-facing)
+constexpr uint32_t GLOBAL_REG_FRONT_FACING = 16;
+
 struct LiteralInputSource {
     // The constant data
     float data;

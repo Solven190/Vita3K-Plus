@@ -35,6 +35,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <chrono>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -176,6 +177,11 @@ struct KernelState {
     void pause_threads();
     void resume_threads();
 
+    int stop_world(SceUID except_id, std::chrono::milliseconds budget);
+    void resume_world();
+
+    void log_thread_hang_dump();
+
     // Kill all guest threads and block until they have exited. Must only be called from a host thread.
     void process_exit();
     std::function<void(int, std::optional<AppLaunchRequest>)> process_exit_callback;
@@ -190,4 +196,5 @@ struct KernelState {
 private:
     std::atomic<SceUID> next_uid{ 1 };
     std::map<SceUID, ThreadStatus> paused_threads_status;
+    std::vector<ThreadStatePtr> world_stopped_threads;
 };
