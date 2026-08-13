@@ -33,6 +33,10 @@
 #include <SDL3/SDL_mutex.h>
 #include <SDL3/SDL_thread.h>
 
+#include <chrono>
+#include <fstream>
+#include <iomanip>
+
 int CorenumAllocator::new_corenum() {
     const std::lock_guard<std::mutex> guard(lock);
 
@@ -248,19 +252,29 @@ void KernelState::log_thread_hang_dump() {
         for (auto &[tid, t] : threads)
             snapshot.push_back(t);
     }
-    LOG_ERROR("HANG DUMP: {} guest thread(s)", snapshot.size());
+
+    std::string dump = fmt::format("HANG DUMP: {} guest thread(s)\n", snapshot.size());
     for (const auto &t : snapshot) {
         const ThreadStatus status = t->status;
         const char *status_str = (status == ThreadStatus::run) ? "run" : (status == ThreadStatus::wait) ? "wait"
-            : (status == ThreadStatus::suspend)                        ? "suspend"
-                                                                       : "dormant";
+            : (status == ThreadStatus::suspend)                                                         ? "suspend"
+                                                                                                        : "dormant";
+        std::string line;
         if (status == ThreadStatus::run) {
-            LOG_ERROR("HANG DUMP: thread {} ({}) status=run (executing or blocked inside an HLE import)", t->name, t->id);
+            line = fmt::format("thread {} ({}) status=run (executing or blocked inside an HLE import) last_import_nid=0x{:08X} import_lr=0x{:X}", t->name, t->id, t->last_import_nid, t->last_import_lr);
         } else {
-            LOG_ERROR("HANG DUMP: thread {} ({}) status={} PC=0x{:X} LR=0x{:X} stack:\n{}",
-                t->name, t->id, status_str, read_pc(*t->cpu), read_lr(*t->cpu), t->log_stack_traceback());
+            line = fmt::format("thread {} ({}) status={} PC=0x{:X} LR=0x{:X} last_import_nid=0x{:08X} import_lr=0x{:X} stack:\n{}", t->name, t->id, status_str, read_pc(*t->cpu), read_lr(*t->cpu), t->last_import_nid, t->last_import_lr, t->log_stack_traceback());
         }
+        LOG_ERROR("HANG DUMP: {}", line);
+        dump += line + "\n";
     }
+
+    // vita3k.log is truncated on relaunch, so also persist the dump where a restart cannot eat it
+    const auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    std::ofstream hang_file("vita3k_hangdump.log", std::ios::app);
+    if (hang_file)
+        hang_file << "==== " << std::put_time(std::localtime(&now), "%Y-%m-%d %H:%M:%S") << " ====\n"
+                  << dump << std::endl;
 }
 
 void KernelState::resume_world() {

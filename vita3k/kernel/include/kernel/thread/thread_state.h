@@ -63,6 +63,9 @@ struct ThreadState {
     std::mutex mutex;
     std::string name;
     SceUID id;
+
+    uint32_t last_import_nid = 0;
+    uint32_t last_import_lr = 0;
     Address entry_point;
 
     Block stack;

@@ -30,7 +30,6 @@
 #include <ctrl/state.h>
 #include <dialog/state.h>
 #include <display/state.h>
-#include <nids/functions.h>
 #include <emuenv/state.h>
 #include <gxm/functions.h>
 #include <gxm/state.h>
@@ -44,6 +43,7 @@
 #include <motion/state.h>
 #include <net/state.h>
 #include <ngs/state.h>
+#include <nids/functions.h>
 #include <np/functions.h>
 #include <np/state.h>
 #include <np/trophy/context.h>

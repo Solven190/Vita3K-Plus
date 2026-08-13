@@ -818,6 +818,7 @@ static void create_fragment_inputs(spv::Builder &b, SpirvShaderParameters &param
                 spv::Id uiv4 = b.makeVectorType(b.makeUintType(32), 4);
 
                 color_attachment_raw = create_builtin_sampler_for_raw(b, features, translation_state, "f_colorAttachment_rawUI");
+                b.addDecoration(color_attachment_raw, spv::DecorationCoherent);
                 if (translation_state.is_vulkan) {
                     b.addDecoration(color_attachment_raw, spv::DecorationBinding, 2);
                     b.addDecoration(color_attachment_raw, spv::DecorationDescriptorSet, 1);

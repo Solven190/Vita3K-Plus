@@ -161,6 +161,10 @@ void call_import(EmuEnvState &emuenv, CPUState &cpu, uint32_t nid, SceUID thread
         log_import_call('H', nid, thread_id, hle_nid_blacklist, lr);
     }
     set_last_import_call(nid, read_lr(cpu));
+    if (const ThreadStatePtr breadcrumb_thread = emuenv.kernel.get_thread(thread_id)) {
+        breadcrumb_thread->last_import_nid = nid;
+        breadcrumb_thread->last_import_lr = read_lr(cpu);
+    }
 
     const ImportFn *fn = resolve_import(nid);
     if (fn) {

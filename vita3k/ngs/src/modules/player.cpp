@@ -138,7 +138,7 @@ bool PlayerModule::process(KernelState &kern, const MemState &mem, const SceUID 
         if ((!snapshot.buffer || snapshot.bytes_count <= 0) && live_buf.buffer && live_buf.bytes_count > 0)
             params = live;
     };
-    
+
     const auto request_initial_buffer = [&]() {
         if (state->bytes_consumed_since_key_on != 0 || logical->requested_initial_buffer)
             return false;
