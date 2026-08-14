@@ -150,6 +150,14 @@ bool is_valid_addr(const MemState &state, Address addr) {
     return addr && state.allocator.free_slot_count(page_num, page_num + 1) == 0;
 }
 
+// re-check under the allocator's writer lock
+bool is_valid_addr_synced(MemState &state, Address addr) {
+    if (is_valid_addr(state, addr))
+        return true;
+    const std::lock_guard<std::mutex> lock(state.generation_mutex);
+    return is_valid_addr(state, addr);
+}
+
 bool is_valid_addr_range(const MemState &state, Address start, Address end) {
     const uint32_t start_page = start / STANDARD_PAGE_SIZE;
     const uint32_t end_page = (end + STANDARD_PAGE_SIZE - 1) / STANDARD_PAGE_SIZE;
@@ -552,7 +560,9 @@ void free(MemState &state, Address address) {
 
     AllocMemPage &page = state.alloc_table[page_num];
     if (!page.allocated) {
-        LOG_CRITICAL("Freeing unallocated page");
+        // continuing would free page.size stale pages in the bitmap, wiping ranges that may since have been re-allocated
+        LOG_CRITICAL("Freeing unallocated page at addr 0x{:X} (stale size {} pages) — ignored", address, static_cast<uint32_t>(page.size));
+        return;
     }
     page.allocated = 0;
 

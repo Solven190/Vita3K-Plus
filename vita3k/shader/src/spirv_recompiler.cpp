@@ -1847,6 +1847,26 @@ static spv::Function *make_vert_finalize_function(spv::Builder &b, const SpirvSh
                 }
 
                 cond_builder.makeEndIf();
+
+                // depth clamp disables z-clipping, so clip eye-plane-crossing primitives ourselves:
+                // [0] w <= 0 is behind the eye; [1] z/w < -1 kills the near-infinity wedge that
+                // survives an exact w=0 clip (clamped-z geometry like KZ sits at z/w ~ -0.001)
+                if (translation_state.is_vulkan && features.support_clip_distance) {
+                    b.addCapability(spv::CapabilityClipDistance);
+                    const spv::Id clip_type = b.makeArrayType(f32, b.makeUintConstant(2), 0);
+                    const spv::Id clip_var = b.createVariable(spv::NoPrecision, spv::StorageClassOutput, clip_type, "gl_ClipDistance");
+                    b.addDecoration(clip_var, spv::DecorationBuiltIn, spv::BuiltInClipDistance);
+                    translation_state.interfaces.push_back(clip_var);
+
+                    const spv::Id clip_z_ref = utils::create_access_chain(b, spv::StorageClassOutput, out_var, { b.makeIntConstant(2) });
+                    const spv::Id clip_w_ref = utils::create_access_chain(b, spv::StorageClassOutput, out_var, { b.makeIntConstant(3) });
+                    const spv::Id clip_z = b.createLoad(clip_z_ref, spv::NoPrecision);
+                    const spv::Id clip_w = b.createLoad(clip_w_ref, spv::NoPrecision);
+                    const spv::Id clip_dist0_ref = utils::create_access_chain(b, spv::StorageClassOutput, clip_var, { b.makeIntConstant(0) });
+                    const spv::Id clip_dist1_ref = utils::create_access_chain(b, spv::StorageClassOutput, clip_var, { b.makeIntConstant(1) });
+                    b.createStore(clip_w, clip_dist0_ref);
+                    b.createStore(b.createBinOp(spv::OpFAdd, f32, clip_z, clip_w), clip_dist1_ref);
+                }
             } else if (vo == SCE_GXM_VERTEX_PROGRAM_OUTPUT_PSIZE) {
                 b.addDecoration(out_var, spv::DecorationBuiltIn, spv::BuiltInPointSize);
                 b.createStore(o_val, out_var);

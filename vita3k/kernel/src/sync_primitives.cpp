@@ -725,7 +725,7 @@ int mutex_try_lock(KernelState &kernel, MemState &mem, const char *export_name, 
     return mutex_lock_impl(kernel, mem, export_name, thread_id, lock_count, mutex, weight, nullptr, true);
 }
 
-inline static int mutex_unlock_impl(KernelState &kernel, const char *export_name, SceUID thread_id, int unlock_count, MutexPtr &mutex) {
+inline static int mutex_unlock_impl(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, int unlock_count, MutexPtr &mutex) {
     const ThreadStatePtr current_thread = kernel.get_thread(thread_id);
 
     const std::lock_guard<std::mutex> mutex_lock(mutex->mutex);
@@ -753,12 +753,19 @@ inline static int mutex_unlock_impl(KernelState &kernel, const char *export_name
                 mutex->owner = waiting_thread;
             }
         }
+
+        // keep the lwmutex workarea in sync
+        if (mutex->workarea) {
+            SceKernelLwMutexWork *workarea_mem = mutex->workarea.get(mem);
+            workarea_mem->lockCount = mutex->lock_count;
+            workarea_mem->owner = mutex->owner ? mutex->owner->id : 0;
+        }
     }
 
     return SCE_KERNEL_OK;
 }
 
-int mutex_unlock(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID mutexid, int unlock_count, SyncWeight weight) {
+int mutex_unlock(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, SceUID mutexid, int unlock_count, SyncWeight weight) {
     assert(mutexid >= 0);
 
     MutexPtr mutex;
@@ -771,7 +778,7 @@ int mutex_unlock(KernelState &kernel, const char *export_name, SceUID thread_id,
             mutex->waiting_threads->size());
     }
 
-    return mutex_unlock_impl(kernel, export_name, thread_id, unlock_count, mutex);
+    return mutex_unlock_impl(kernel, mem, export_name, thread_id, unlock_count, mutex);
 }
 
 int mutex_delete(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID mutexid, SyncWeight weight) {
@@ -1256,7 +1263,7 @@ int condvar_wait(KernelState &kernel, MemState &mem, const char *export_name, Sc
 
     std::unique_lock<std::mutex> condition_variable_lock(condvar->mutex);
 
-    if (auto error = mutex_unlock_impl(kernel, export_name, thread_id, 1, condvar->associated_mutex))
+    if (auto error = mutex_unlock_impl(kernel, mem, export_name, thread_id, 1, condvar->associated_mutex))
         return error;
 
     std::unique_lock<std::mutex> thread_lock(thread->mutex);

@@ -671,6 +671,7 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
             .occlusionQueryPrecise = physical_device_features.occlusionQueryPrecise,
             .fragmentStoresAndAtomics = physical_device_features.fragmentStoresAndAtomics,
             .shaderStorageImageExtendedFormats = physical_device_features.shaderStorageImageExtendedFormats,
+            .shaderClipDistance = physical_device_features.shaderClipDistance,
             .shaderInt16 = physical_device_features.shaderInt16,
         };
 
@@ -828,6 +829,9 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
         }
 
         features.preserve_f16_nan_as_u16 = features.support_shader_interlock && static_cast<bool>(physical_device_features.independentBlend);
+
+        // depth clamp turns off z-clipping, so behind-the-eye primitives must be clipped in the shader instead
+        features.support_clip_distance = enable_depth_clamp && static_cast<bool>(physical_device_features.depthClamp) && static_cast<bool>(physical_device_features.shaderClipDistance);
 
         vk::StructureChain<vk::DeviceCreateInfo,
             vk::PhysicalDeviceBufferDeviceAddressFeatures,
@@ -1134,7 +1138,7 @@ void VKState::log_gpu_configuration(const Config &cfg) {
     LOG_INFO("  derived: should_use_shader_interlock={} should_use_texture_barrier={} programmable_blending={}",
         features.should_use_shader_interlock(), features.should_use_texture_barrier(),
         features.is_programmable_blending_supported());
-    LOG_INFO("  build switches: enable_depth_clamp={}", enable_depth_clamp);
+    LOG_INFO("  build switches: enable_depth_clamp={} support_clip_distance={}", enable_depth_clamp, features.support_clip_distance);
 
     const char *mapping_names[] = { "Disabled", "DoubleBuffer", "ExternalHost", "PageTable", "NativeBuffer" };
     const int mapping_idx = static_cast<int>(mapping_method);
@@ -1450,6 +1454,7 @@ uint32_t VKState::get_features_mask() {
             bool direct_fragcolor : 1;
             bool support_texture_barrier : 1;
             bool support_unknown_format : 1;
+            bool use_clip_distance : 1;
         };
         uint32_t value;
     } features_mask;
@@ -1466,6 +1471,7 @@ uint32_t VKState::get_features_mask() {
     features_mask.direct_fragcolor = features.direct_fragcolor;
     features_mask.support_texture_barrier = features.support_texture_barrier;
     features_mask.support_unknown_format = features.support_unknown_format;
+    features_mask.use_clip_distance = features.support_clip_distance;
 
     return features_mask.value;
 }

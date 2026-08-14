@@ -190,6 +190,8 @@ public:
             LOG_TRACE("Instruction fetch at address 0x{:X}", addr);
         const Ptr<uint32_t> ptr{ static_cast<Address>(addr) };
         if (!ptr || !ptr.valid(*parent->mem) || ptr.address() < parent->mem->host_page_size) {
+            if (!confirm_invalid_access(addr, "instruction fetch"))
+                return MemoryRead32(addr);
             uint32_t bc_nid = 0, bc_lr = 0;
             get_last_import_call(bc_nid, bc_lr);
             LOG_CRITICAL("Invalid instruction fetch at address 0x{:X} (last HLE import on this thread: nid=0x{:X} called from LR=0x{:X})\n{}", addr, bc_nid, bc_lr, cpu->save_context().description());
@@ -206,6 +208,27 @@ public:
                     a += insn_size ? insn_size : 2;
                 }
                 LOG_CRITICAL("Code before the call site (LR-64..LR, thumb={}):\n{}", thumb_caller, window);
+            }
+            // memory each register points at, captured at crash time
+            {
+                const CPUContext crash_ctx = cpu->save_context();
+                std::string reg_mem;
+                for (int r = 0; r < 14; r++) {
+                    const uint32_t rv = crash_ctx.cpu_registers[r];
+                    const uint32_t base = rv & ~3u;
+                    if (base < parent->mem->host_page_size)
+                        continue;
+                    reg_mem += fmt::format("  [r{}=0x{:08X}]:", r, rv);
+                    for (int w = -2; w < 6; w++) {
+                        const Ptr<uint32_t> wp{ static_cast<Address>(base + w * 4) };
+                        if (wp.valid(*parent->mem))
+                            reg_mem += fmt::format(" {:08X}", *wp.get(*parent->mem));
+                        else
+                            reg_mem += " ????????";
+                    }
+                    reg_mem += "\n";
+                }
+                LOG_CRITICAL("Memory at register targets (words -2..+5):\n{}", reg_mem);
             }
             return std::nullopt;
         }
@@ -284,10 +307,27 @@ public:
         }
     }
 
+    // rechecks a failed lock-free validity test under the allocator lock
+    bool confirm_invalid_access(Dynarmic::A32::VAddr addr, const char *what) {
+        if (addr >= parent->mem->host_page_size && is_valid_addr_synced(*parent->mem, static_cast<Address>(addr))) {
+            static std::atomic<uint32_t> transient_count{ 0 };
+            const uint32_t n = transient_count.fetch_add(1, std::memory_order_relaxed);
+            if (n < 16)
+                LOG_CRITICAL("TRANSIENT invalid {} at 0x{:X} recovered (PC 0x{:X}, thread {}) — lock-free validity race caught in the act",
+                    what, addr, this->cpu->get_pc(), parent->thread_id);
+            else if (n == 16)
+                LOG_CRITICAL("Further transient-invalid recoveries will be suppressed");
+            return false;
+        }
+        return true;
+    }
+
     template <typename T>
     T MemoryRead(Dynarmic::A32::VAddr addr) {
         Ptr<T> ptr{ addr };
         if (!ptr || !ptr.valid(*parent->mem) || ptr.address() < parent->mem->host_page_size) {
+            if (!confirm_invalid_access(addr, "read"))
+                return *ptr.get(*parent->mem);
             if (should_log_invalid_access()) {
                 LOG_ERROR("Invalid read of uint{}_t at address: 0x{:x}\n{}", sizeof(T) * 8, addr, this->cpu->save_context().description());
 
@@ -327,6 +367,10 @@ public:
     void MemoryWrite(Dynarmic::A32::VAddr addr, T value) {
         Ptr<T> ptr{ addr };
         if (!ptr || !ptr.valid(*parent->mem) || ptr.address() < parent->mem->host_page_size) {
+            if (!confirm_invalid_access(addr, "write")) {
+                *ptr.get(*parent->mem) = value;
+                return;
+            }
             if (should_log_invalid_access()) {
                 LOG_ERROR("Invalid write of uint{}_t at addr: 0x{:x}, val = 0x{:x}\n{}", sizeof(T) * 8, addr, value, this->cpu->save_context().description());
 
