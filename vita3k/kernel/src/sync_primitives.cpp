@@ -15,10 +15,13 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+#include <chrono>
 #include <cpu/functions.h>
 #include <kernel/state.h>
 #include <kernel/sync_primitives.h>
+#include <kernel/thread/thread_state.h>
 
+#include <array>
 #include <kernel/types.h>
 #include <util/lock_and_find.h>
 #include <util/log.h>
@@ -49,12 +52,36 @@ inline static CondvarPtrs &get_condvars(KernelState &kernel, SyncWeight weight) 
     return weight == SyncWeight::Light ? kernel.lwcondvars : kernel.condvars;
 }
 
+namespace {
+struct MutexCacheEntry {
+    SceUID uid = 0;
+    SyncWeight weight = SyncWeight::Light;
+    MutexPtr ptr;
+};
+thread_local std::array<MutexCacheEntry, 8> g_mutex_cache;
+thread_local uint32_t g_mutex_cache_next = 0;
+} // namespace
+
 inline static int find_mutex(MutexPtr &mutex_out, MutexPtrs **mutexes_out, KernelState &kernel, const char *export_name, SceUID mutexid, SyncWeight weight) {
     MutexPtrs &mutexes = get_mutexes(kernel, weight);
+
+    for (auto &entry : g_mutex_cache) {
+        if (entry.uid == mutexid && entry.weight == weight && entry.ptr
+            && !entry.ptr->deleted.load(std::memory_order_relaxed)) {
+            mutex_out = entry.ptr;
+            if (mutexes_out)
+                *mutexes_out = &mutexes;
+            return SCE_KERNEL_OK;
+        }
+    }
+
     mutex_out = lock_and_find(mutexid, mutexes, kernel.mutex);
     if (!mutex_out) {
         return unknown_mutex_id(export_name, weight);
     }
+
+    auto &slot = g_mutex_cache[g_mutex_cache_next++ % g_mutex_cache.size()];
+    slot = { mutexid, weight, mutex_out };
 
     if (mutexes_out)
         *mutexes_out = &mutexes;
@@ -81,6 +108,8 @@ inline static int handle_timeout(KernelState &kernel, const ThreadStatePtr &thre
     std::unique_lock<std::mutex> &primitive_lock, WaitingThreadQueuePtr &queue,
     const ThreadDataQueueInterator<WaitingThreadData> &data_it, const char *export_name,
     SceUInt *const timeout) {
+    guest_sched_release_for_block();
+
     if (timeout) {
         bool status = false;
         auto start = std::chrono::steady_clock::now();
@@ -796,6 +825,7 @@ int mutex_delete(KernelState &kernel, const char *export_name, SceUID thread_id,
     }
 
     if (mutex->waiting_threads->empty()) {
+        mutex->deleted.store(true, std::memory_order_relaxed);
         const std::lock_guard<std::mutex> kernel_guard(kernel.mutex);
         mutexes->erase(mutexid);
     } else {

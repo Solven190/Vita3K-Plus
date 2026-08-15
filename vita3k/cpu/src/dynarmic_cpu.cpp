@@ -20,12 +20,16 @@
 #include <cpu/state.h>
 #include <util/log.h>
 
+#include <cpu/functions.h>
+#include <mem/functions.h>
 #include <mem/ptr.h>
 
 #include <dynarmic/frontend/A32/a32_ir_emitter.h>
 #include <dynarmic/interface/A32/coprocessor.h>
 #include <dynarmic/interface/exclusive_monitor.h>
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <chrono>
@@ -33,6 +37,8 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
+#include <vector>
 
 // Log the first few invalid guest accesses in full, then suppress (a guest null-deref loop can log GBs).
 static bool should_log_invalid_access() {

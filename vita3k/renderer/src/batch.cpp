@@ -18,6 +18,8 @@
 #include <renderer/commands.h>
 #include <renderer/driver_functions.h>
 #include <renderer/functions.h>
+#include <array>
+#include <cpu/functions.h>
 #include <renderer/state.h>
 #include <renderer/types.h>
 
@@ -109,12 +111,21 @@ static void process_batch(renderer::State &state, const FeatureState &features, 
             break;
         }
 
-        auto handler = handlers.find(cmd->opcode);
-        if (handler == handlers.end()) {
+        static const std::array<CommandHandlerFunc *, 32> handler_table = [&]() {
+            std::array<CommandHandlerFunc *, 32> table{};
+            for (const auto &[op, fn] : handlers)
+                if (static_cast<size_t>(op) < table.size())
+                    table[static_cast<size_t>(op)] = fn;
+            return table;
+        }();
+
+        const size_t op_index = static_cast<size_t>(cmd->opcode);
+        CommandHandlerFunc *handler_fn = op_index < handler_table.size() ? handler_table[op_index] : nullptr;
+        if (!handler_fn) {
             LOG_ERROR("Unimplemented command opcode {}", static_cast<int>(cmd->opcode));
         } else {
             CommandHelper helper(cmd);
-            handler->second(state, mem, config, helper, features, command_list.context);
+            handler_fn(state, mem, config, helper, features, command_list.context);
         }
 
         Command *last_cmd = cmd;

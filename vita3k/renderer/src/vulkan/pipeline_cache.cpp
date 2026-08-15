@@ -17,6 +17,7 @@
 
 #include <renderer/vulkan/pipeline_cache.h>
 
+#include <renderer/functions.h>
 #include <renderer/vulkan/gxm_to_vulkan.h>
 #include <renderer/vulkan/state.h>
 #include <renderer/vulkan/types.h>

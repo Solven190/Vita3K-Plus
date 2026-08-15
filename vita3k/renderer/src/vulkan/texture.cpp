@@ -15,6 +15,8 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+#include <chrono>
+#include <cpu/functions.h>
 #include <renderer/vulkan/functions.h>
 
 #include <renderer/vulkan/gxm_to_vulkan.h>
@@ -128,6 +130,7 @@ void sync_texture(VKContext &context, MemState &mem, std::size_t index, SceGxmTe
         const bool needs_nearest = !context.state.texture_cache.format_supports_linear_filter(lookup_result->format);
         context.state.texture_cache.cache_and_bind_sampler(texture, needs_nearest);
     } else {
+        context.state.texture_cache.current_scene = context.scene_timestamp;
         context.state.texture_cache.cache_and_bind_texture(texture, mem);
         auto &image = context.state.texture_cache.current_texture->texture;
         lookup_result = TextureLookupResult{

@@ -100,6 +100,8 @@ struct KernelState {
     std::mutex mutex;
     CodecEngineBlocks codec_blocks;
 
+    bool accurate_thread_scheduling = false;
+
     Ptr<const void> tls_address = Ptr<const void>(0);
     unsigned int tls_psize = 0;
     unsigned int tls_msize = 0;

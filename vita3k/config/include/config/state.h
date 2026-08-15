@@ -79,6 +79,8 @@ struct Config {
         bool v_sync = true;
         int anisotropic_filtering = 1;
         bool async_pipeline_compilation = true;
+        bool accurate_thread_scheduling = false;
+        int guest_cores = 1;
         bool import_textures = false;
         bool export_textures = false;
         bool export_as_png = false;

@@ -17,6 +17,8 @@
 
 #include <renderer/functions.h>
 
+#include <chrono>
+#include <cpu/functions.h>
 #include <renderer/profile.h>
 #include <renderer/texture_cache.h>
 
@@ -709,6 +711,7 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
         }
 
         info->use_hash = should_use_hash;
+        info->last_hash_scene = current_scene;
         if (info->use_hash) {
             if (import_textures || export_textures)
                 info->hash = hash_texture_nostride(gxm_texture, mem);
@@ -722,13 +725,18 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
         info = gxm_it->second;
         configure = false;
         if (info->use_hash) {
-            const uint64_t previous_hash = info->hash;
-            if (import_textures || export_textures)
-                info->hash = hash_texture_nostride(gxm_texture, mem);
-            else
-                info->hash = hash_texture_data(gxm_texture, info->texture_size, mem) ^ 1;
+            if (current_scene != 0 && info->last_hash_scene == current_scene) {
+                upload = false;
+            } else {
+                info->last_hash_scene = current_scene;
+                const uint64_t previous_hash = info->hash;
+                if (import_textures || export_textures)
+                    info->hash = hash_texture_nostride(gxm_texture, mem);
+                else
+                    info->hash = hash_texture_data(gxm_texture, info->texture_size, mem) ^ 1;
 
-            upload = previous_hash != info->hash;
+                upload = previous_hash != info->hash;
+            }
         } else {
             range_protect_begin = align(gxm_texture.data_addr << 2, mem.host_page_size);
             range_protect_end = align_down((gxm_texture.data_addr << 2) + info->texture_size, mem.host_page_size);

@@ -17,8 +17,13 @@
 
 #include "SceIofilemgr.h"
 
+#include <cpu/functions.h>
 #include <io/functions.h>
+#include <kernel/thread/thread_state.h>
 #include <kernel/types.h>
+
+#include <chrono>
+#include <thread>
 
 #include <util/tracy.h>
 TRACY_MODULE_NAME(SceIofilemgr);
@@ -272,6 +277,11 @@ EXPORT(int, sceIoLseek32, const SceUID fd, const int32_t offset, const SceIoSeek
 
 EXPORT(int, sceIoRead, const SceUID fd, void *data, const SceSize size) {
     TRACY_FUNC(sceIoRead, fd, data, size);
+    if (emuenv.cfg.current_config.file_loading_delay > 0) {
+        const uint32_t delay_us = emuenv.cfg.current_config.file_loading_delay * 1000 + size / 20;
+        guest_sched_release_for_block();
+        std::this_thread::sleep_for(std::chrono::microseconds(delay_us));
+    }
     return read_file(data, emuenv.io, fd, size, export_name);
 }
 

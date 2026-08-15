@@ -23,6 +23,8 @@
 #include <util/containers.h>
 #include <vkutil/objects.h>
 
+#include <atomic>
+#include <chrono>
 #include <functional>
 #include <optional>
 
@@ -47,6 +49,10 @@ enum struct SurfaceTiling {
     Swizzled,
     Tiled
 };
+
+extern std::atomic<uint32_t> f10_sync_count;
+extern std::atomic<uint32_t> f10_skip_count;
+extern std::atomic<uint64_t> f10_repack_us;
 
 struct SurfaceCacheInfo {
     vkutil::Image texture;
@@ -134,6 +140,9 @@ struct ColorSurfaceCacheInfo : public SurfaceCacheInfo {
 
     // do we need some CPU convert/unswizzling part for surface sync
     bool need_post_surface_sync = false;
+
+    // repack-format surfaces (CPU-converted writeback) sync at most once per throttle window
+    std::chrono::steady_clock::time_point last_repack_sync_time{};
 
     // only for double buffer, do we need to sync the two views?
     bool need_buffer_sync = false;

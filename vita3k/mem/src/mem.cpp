@@ -302,6 +302,11 @@ bool handle_access_violation(MemState &state, uint8_t *addr, bool write) noexcep
         fmt::print("Access: {}\n", log_hex(vaddr));
     }
 
+    // never allow accesses to the null guard page - letting them through silently corrupts low memory
+    if (vaddr < 0x1000) {
+        return false;
+    }
+
     // HACK: keep going recovery for faults with no covering protect_tree entry
     const auto unhandled_but_valid = [&]() {
         apply_host_protect(reinterpret_cast<uint8_t *>(align_down(fault_addr, state.host_page_size)),

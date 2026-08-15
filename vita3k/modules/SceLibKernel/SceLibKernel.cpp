@@ -629,7 +629,8 @@ EXPORT(SceUID, sceIoOpen, const char *file, const int flags, const SceMode mode)
     }
 
     if (emuenv.cfg.current_config.file_loading_delay > 0)
-        std::this_thread::sleep_for(std::chrono::milliseconds(emuenv.cfg.current_config.file_loading_delay));
+        guest_sched_release_for_block();
+    std::this_thread::sleep_for(std::chrono::milliseconds(emuenv.cfg.current_config.file_loading_delay));
 
     LOG_INFO("Opening file: {}", file);
     return open_file(emuenv.io, file, flags, emuenv.vita_fs_path, export_name);
@@ -642,6 +643,11 @@ EXPORT(int, sceIoOpenAsync) {
 
 EXPORT(SceSSize, sceIoPread, SceUID fd, void *buf, SceSize nbyte, SceOff offset) {
     TRACY_FUNC(sceIoPread, fd, buf, nbyte, offset);
+    if (emuenv.cfg.current_config.file_loading_delay > 0) {
+        const uint32_t delay_us = emuenv.cfg.current_config.file_loading_delay * 1000 + nbyte / 20;
+        guest_sched_release_for_block();
+        std::this_thread::sleep_for(std::chrono::microseconds(delay_us));
+    }
     auto pos = tell_file(emuenv.io, fd, export_name);
     if (pos < 0) {
         return static_cast<SceSSize>(pos);

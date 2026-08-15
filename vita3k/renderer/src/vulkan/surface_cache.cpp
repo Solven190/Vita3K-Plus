@@ -38,11 +38,15 @@ extern "C" {
 
 namespace renderer::vulkan {
 thread_local bool surface_sync_internal_write = false;
-}
+std::atomic<uint32_t> f10_sync_count{ 0 };
+std::atomic<uint32_t> f10_skip_count{ 0 };
+std::atomic<uint64_t> f10_repack_us{ 0 };
+} // namespace renderer::vulkan
 
 static bool format_support_surface_sync(SceGxmColorBaseFormat format) {
-    // we use rgba16 to emulate this format, don't even try to convert it back for now
-    return format != SCE_GXM_COLOR_BASE_FORMAT_U2F10F10F10;
+    // U2F10F10F10 (emulated with RGBA16F) is converted back by pack_rgba16f_to_u2f10f10f10;
+    // games CPU-read such surfaces (e.g. Sonic Transformed's 4x4 auto-exposure measurement)
+    return true;
 }
 
 static bool format_support_swizzle(SceGxmColorBaseFormat format) {
@@ -92,6 +96,41 @@ static void pack_rgba8_to_r4g4b4a4(uint8_t *dst, const uint8_t *src, uint32_t pi
     }
 }
 
+static bool surface_sync_needs_f10_repack(const ColorSurfaceCacheInfo &surface) {
+    return surface.format == SCE_GXM_COLOR_BASE_FORMAT_U2F10F10F10 && surface.texture.format == vk::Format::eR16G16B16A16Sfloat;
+}
+
+// F16 (s1e5m10) -> unsigned F10 (e5m5)
+static inline uint32_t half_to_f10(uint32_t h) {
+    // branchless: subtracting the sign bit yields an all-ones mask for positives, 0 for negatives
+    return ((h >> 5) & 0x3FF) & (((h >> 15) & 1) - 1);
+}
+
+// F16 alpha -> 2-bit unorm, rounding to the nearest of {0, 1/3, 2/3, 1}.
+static inline uint32_t half_to_unorm2(uint32_t h) {
+    if (h & 0x8000)
+        return 0;
+    return (h >= 0x3AAB) ? 3 : (h >= 0x3800) ? 2
+        : (h >= 0x3155)                      ? 1
+                                             : 0;
+}
+
+static void pack_rgba16f_to_u2f10f10f10(uint8_t *dst, const uint8_t *src, uint32_t pixel_stride, uint32_t height) {
+    const uint32_t count = pixel_stride * height;
+    uint32_t *dst_px = reinterpret_cast<uint32_t *>(dst);
+    const uint64_t *src_px = reinterpret_cast<const uint64_t *>(src);
+
+    for (uint32_t i = 0; i < count; i++) {
+        const uint64_t v = src_px[i];
+        const uint32_t r = half_to_f10(static_cast<uint32_t>(v) & 0xFFFF);
+        const uint32_t g = half_to_f10(static_cast<uint32_t>(v >> 16) & 0xFFFF);
+        const uint32_t b = half_to_f10(static_cast<uint32_t>(v >> 32) & 0xFFFF);
+        const uint32_t a = half_to_unorm2(static_cast<uint32_t>(v >> 48));
+
+        dst_px[i] = r | (g << 10) | (b << 20) | (a << 30);
+    }
+}
+
 static void protect_surface(MemState &mem, ColorSurfaceCacheInfo &info) {
     const bool trap_reads = (info.tiling == SurfaceTiling::Linear
         && format_support_surface_sync(info.format));
@@ -114,8 +153,13 @@ static void protect_surface(MemState &mem, ColorSurfaceCacheInfo &info) {
 
     add_protect(mem, addr_start, addr_end - addr_start, perm,
         [dirty, need_sync](Address, bool write) {
-            if (write && dirty && !surface_sync_internal_write)
+            // ignore our own guest write-backs
+            if (write && surface_sync_internal_write)
+                return true;
+            if (write && dirty) {
                 *dirty = true;
+                return true;
+            }
             if (need_sync)
                 *need_sync = true;
             return true;
@@ -360,6 +404,8 @@ bool VKSurfaceCache::try_upload_guest_content(ColorSurfaceCacheInfo &info, MemSt
     const bool upload_supported = state.features.enable_memory_mapping
         && info.tiling == SurfaceTiling::Linear
         && format_support_surface_sync(info.format)
+        // guest U2F10F10F10 -> RGBA16F upload conversion is not implemented (sync is one-way)
+        && info.format != SCE_GXM_COLOR_BASE_FORMAT_U2F10F10F10
         && info.swizzle.r == vk::ComponentSwizzle::eR
         && !info.raw_image
         && vk::blockSize(info.texture.format) > 0
@@ -1942,6 +1988,17 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
     if (last_written_surface == nullptr || !*last_written_surface->need_surface_sync)
         return nullptr;
 
+    // repack-format surfaces (CPU-converted writeback) sync at most once per 25ms
+    if (surface_sync_needs_f10_repack(*last_written_surface)) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_written_surface->last_repack_sync_time < std::chrono::milliseconds(25)) {
+            f10_skip_count.fetch_add(1, std::memory_order_relaxed);
+            return nullptr;
+        }
+        last_written_surface->last_repack_sync_time = now;
+        f10_sync_count.fetch_add(1, std::memory_order_relaxed);
+    }
+
     VKContext *context = reinterpret_cast<VKContext *>(state.context);
     vk::CommandBuffer cmd_buffer = context->render_cmd;
 
@@ -1973,7 +2030,7 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
     }
 
     const uint32_t pixel_stride = (last_written_surface->stride_bytes * 8) / gxm::bits_per_pixel(last_written_surface->format);
-    const bool needs_copy_buffer = format_need_additional_memory(last_written_surface->format) || surface_sync_needs_u4u4u4u4_repack(*last_written_surface);
+    const bool needs_copy_buffer = format_need_additional_memory(last_written_surface->format) || surface_sync_needs_u4u4u4u4_repack(*last_written_surface) || surface_sync_needs_f10_repack(*last_written_surface);
 
     // For macrotile-sync surfaces at non-integer scale factors, clamp the sync
     // to only the rendered macroblocks.
@@ -2071,7 +2128,8 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
 
         if (!copy_buffer.buffer) {
             copy_buffer.size = static_cast<vk::DeviceSize>(pixel_stride) * last_written_surface->original_height * vk::blockSize(last_written_surface->texture.format);
-            copy_buffer.init_buffer(vk::BufferUsageFlagBits::eTransferDst, vkutil::vma_mapped_alloc);
+            // the CPU repack reads this whole buffer back so it must be host-cached. Reading write-combined memory costs ~60ms for a 4MB surface.
+            copy_buffer.init_buffer(vk::BufferUsageFlagBits::eTransferDst, vkutil::vma_readback_alloc);
         }
 
         buffer = copy_buffer.buffer;
@@ -2175,6 +2233,14 @@ void VKSurfaceCache::perform_post_surface_sync(const MemState &mem, ColorSurface
 
     if (surface_sync_needs_u4u4u4u4_repack(*surface)) {
         pack_rgba8_to_r4g4b4a4(pixels, static_cast<const uint8_t *>(surface->copy_buffer->mapped_data), pixel_stride, surface->original_height);
+        return;
+    }
+
+    if (surface_sync_needs_f10_repack(*surface)) {
+        const auto t0 = std::chrono::steady_clock::now();
+        pack_rgba16f_to_u2f10f10f10(pixels, static_cast<const uint8_t *>(surface->copy_buffer->mapped_data), pixel_stride, surface->original_height);
+        f10_repack_us.fetch_add(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count(), std::memory_order_relaxed);
+
         return;
     }
 

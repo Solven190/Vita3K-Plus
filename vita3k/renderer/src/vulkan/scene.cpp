@@ -18,6 +18,7 @@
 #include <renderer/vulkan/functions.h>
 
 #include <gxm/functions.h>
+#include <renderer/functions.h>
 #include <renderer/vulkan/gxm_to_vulkan.h>
 
 #include <config/state.h>

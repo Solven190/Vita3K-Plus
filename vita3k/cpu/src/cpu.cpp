@@ -17,11 +17,16 @@
 
 #include <cpu/disasm/functions.h>
 #include <cpu/functions.h>
+
+#include <algorithm>
+#include <atomic>
 #include <cpu/impl/dynarmic_cpu.h>
 #include <cpu/impl/interface.h>
 #include <cpu/state.h>
 #include <mem/ptr.h>
+#include <string>
 #include <util/types.h>
+#include <vector>
 
 #include <memory>
 #include <string>

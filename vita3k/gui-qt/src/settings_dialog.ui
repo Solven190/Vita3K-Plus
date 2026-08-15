@@ -700,6 +700,13 @@ QGroupBox[flat=&quot;true&quot;]::title {
                     </widget>
                    </item>
                    <item>
+                    <widget class="QCheckBox" name="accurate_thread_scheduling">
+                     <property name="text">
+                      <string>Accurate Thread Scheduling</string>
+                     </property>
+                    </widget>
+                   </item>
+                   <item>
                     <layout class="QHBoxLayout" name="memory_mapping_layout">
                      <property name="spacing">
                       <number>8</number>

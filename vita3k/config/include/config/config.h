@@ -153,6 +153,8 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(int, "anisotropic-filtering", 1, anisotropic_filtering)                                        \
     code(bool, "texture-cache", true, texture_cache)                                                    \
     code(bool, "async-pipeline-compilation", true, async_pipeline_compilation)                          \
+    code(bool, "accurate-thread-scheduling", false, accurate_thread_scheduling)                         \
+    code(int, "guest-cores", 1, guest_cores)                                                            \
     code(bool, "show-compile-shaders", true, show_compile_shaders)                                      \
     code(bool, "hashless-texture-cache", false, hashless_texture_cache)                                 \
     code(bool, "import-textures", false, import_textures)                                               \

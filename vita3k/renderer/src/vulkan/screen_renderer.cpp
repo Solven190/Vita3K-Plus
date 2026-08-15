@@ -456,6 +456,7 @@ bool ScreenRenderer::acquire_swapchain_image() {
         if (acquire_result == vk::Result::eErrorOutOfDateKHR
             || acquire_result == vk::Result::eErrorSurfaceLostKHR) {
             need_rebuild = true;
+            rebuild_reason = acquire_result == vk::Result::eErrorOutOfDateKHR ? "acquire: out of date" : "acquire: surface lost";
             need_surface_recreate = acquire_result == vk::Result::eErrorSurfaceLostKHR;
         } else {
             LOG_WARN("Failed to get next image. Error: {}", vk::to_string(acquire_result));
@@ -466,8 +467,10 @@ bool ScreenRenderer::acquire_swapchain_image() {
         return false;
     }
 
-    if (acquire_result == vk::Result::eSuboptimalKHR)
-        need_rebuild = !surface_matches_window_size();
+    if (acquire_result == vk::Result::eSuboptimalKHR && note_size_mismatch(!surface_matches_window_size())) {
+        need_rebuild = true;
+        rebuild_reason = "suboptimal + persistent size mismatch";
+    }
 
     // wait for the previous frame using this image to finish
     auto result = state.device.waitForFences(fences[swapchain_image_idx], VK_TRUE, next_image_timeout);
@@ -580,9 +583,13 @@ void ScreenRenderer::swap_window() {
 
     auto result = state.general_queue.presentKHR(&present_info);
     if (result == vk::Result::eSuboptimalKHR) {
-        need_rebuild = !surface_matches_window_size();
+        if (note_size_mismatch(!surface_matches_window_size())) {
+            need_rebuild = true;
+            rebuild_reason = "present: suboptimal + persistent size mismatch";
+        }
     } else if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eErrorSurfaceLostKHR) {
         need_rebuild = true;
+        rebuild_reason = result == vk::Result::eErrorOutOfDateKHR ? "present: out of date" : "present: surface lost";
         need_surface_recreate = result == vk::Result::eErrorSurfaceLostKHR;
     } else if (result != vk::Result::eSuccess) {
         LOG_ERROR("Could not present KHR.");
@@ -713,8 +720,12 @@ bool ScreenRenderer::ensure_swapchain() {
     if (!window_has_drawable_size(state))
         return false;
 
-    if (!need_rebuild && !need_surface_recreate && swapchain && surface_matches_window_size())
-        return true;
+    if (!need_rebuild && !need_surface_recreate && swapchain) {
+        // A one-frame disagreement between what Vulkan reports as the surface extent and what the window reports as its client size is not a resize
+        if (!note_size_mismatch(!surface_matches_window_size()))
+            return true;
+        rebuild_reason = "persistent window size mismatch";
+    }
 
     if (!rebuild_swapchain_if_visible()) {
         need_rebuild = true;
@@ -726,12 +737,26 @@ bool ScreenRenderer::ensure_swapchain() {
     return true;
 }
 
+bool ScreenRenderer::note_size_mismatch(bool mismatched) {
+    if (!mismatched) {
+        size_mismatch_frames = 0;
+        return false;
+    }
+    return ++size_mismatch_frames >= 4;
+}
+
 bool ScreenRenderer::rebuild_swapchain_if_visible() {
     if (!window_has_drawable_size(state))
         return false;
 
+    // This is the most expensive thing the emulator does outside loading
+    // it idles the device, which stalls the vblank thread too
+    auto *frame_host = static_cast<renderer::State &>(state).frame;
+    const auto rebuild_start = std::chrono::steady_clock::now();
     state.device.waitIdle();
+    const auto idled = std::chrono::steady_clock::now();
     destroy_swapchain();
+    const auto destroyed = std::chrono::steady_clock::now();
 
 #ifdef __ANDROID__
     if (!create())
@@ -742,6 +767,15 @@ bool ScreenRenderer::rebuild_swapchain_if_visible() {
 #endif
 
     create_swapchain();
+    const auto created = std::chrono::steady_clock::now();
+    const auto ms = [](auto a, auto b) {
+        return std::chrono::duration_cast<std::chrono::microseconds>(b - a).count() / 1000.0;
+    };
+    LOG_WARN("[SWAPCHAIN] rebuild ({}): window={}x{} -> swapchain={}x{} | waitIdle={:.1f}ms destroy={:.1f}ms create={:.1f}ms total={:.1f}ms",
+        rebuild_reason, frame_host->drawable_width(), frame_host->drawable_height(),
+        extent.width, extent.height, ms(rebuild_start, idled), ms(idled, destroyed),
+        ms(destroyed, created), ms(rebuild_start, created));
+    size_mismatch_frames = 0;
     return static_cast<bool>(swapchain);
 }
 

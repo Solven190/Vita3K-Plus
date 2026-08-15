@@ -323,6 +323,7 @@ void SettingsDialog::load_config() {
     m_ui->vsync->setChecked(m_config.v_sync);
     m_ui->disable_surface_sync->setChecked(m_config.disable_surface_sync);
     m_ui->async_pipeline_compilation->setChecked(m_config.async_pipeline_compilation);
+    m_ui->accurate_thread_scheduling->setChecked(m_config.accurate_thread_scheduling);
 
     {
         m_ui->memory_mapping_box->clear();
@@ -613,6 +614,7 @@ void SettingsDialog::build_desired_config(Config &desired) const {
     current.v_sync = m_ui->vsync->isChecked();
     current.disable_surface_sync = m_ui->disable_surface_sync->isChecked();
     current.async_pipeline_compilation = m_ui->async_pipeline_compilation->isChecked();
+    current.accurate_thread_scheduling = m_ui->accurate_thread_scheduling->isChecked();
     current.memory_mapping = m_ui->memory_mapping_box->currentData().toString().toStdString();
     current.screen_filter = m_ui->screen_filter_box->currentText().toStdString();
     current.resolution_multiplier = static_cast<float>(m_ui->resolution_upscale->value()) / 4.0f;
@@ -1199,6 +1201,7 @@ void SettingsDialog::setup_connections() {
         { m_ui->vsync, tr("V-Sync"), m_tooltips->vsync },
         { m_ui->disable_surface_sync, tr("Disable Surface Sync"), m_tooltips->disable_surface_sync },
         { m_ui->async_pipeline_compilation, tr("Asynchronous Pipeline Compilation"), m_tooltips->async_pipeline },
+        { m_ui->accurate_thread_scheduling, tr("Accurate Thread Scheduling"), m_tooltips->accurate_thread_scheduling },
         { m_ui->memory_mapping_box, tr("Memory Mapping"), m_tooltips->memory_mapping },
         { m_ui->screen_filter_box, tr("Screen Filter"), m_tooltips->screen_filter },
         { m_ui->gb_gpu_device, tr("Graphics Device"), m_tooltips->gpu_device },

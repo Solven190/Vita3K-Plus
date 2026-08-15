@@ -21,6 +21,7 @@
 #include <renderer/vulkan/gxm_to_vulkan.h>
 #include <renderer/vulkan/state.h>
 
+#include <cpu/functions.h>
 #include <gxm/functions.h>
 #include <renderer/functions.h>
 
@@ -35,27 +36,36 @@ void VKContext::wait_thread_function(const MemState &mem) {
     // try to wait for multiple fences at the same time if possible
     std::vector<vk::Fence> fences;
 
+    uint64_t stat_fence_us = 0, stat_post_us = 0;
+    uint32_t stat_notifs = 0, stat_posts = 0, stat_frames = 0, stat_buffer_syncs = 0;
+    auto stat_last = std::chrono::steady_clock::now();
+    auto elapsed_us = [](std::chrono::steady_clock::time_point t0) {
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count());
+    };
+
     auto wait_for_fences = [&]() {
+        const auto t0 = std::chrono::steady_clock::now();
         while (!fences.empty()) {
             // timeout so we can check for shutdown
             auto result = state.device.waitForFences(fences, VK_TRUE, 100'000'000ULL);
             if (result == vk::Result::eSuccess) {
                 // don't reset them
                 fences.clear();
-                return;
+                break;
             }
             if (result == vk::Result::eTimeout) {
                 if (state.request_queue.is_aborted()) {
                     fences.clear();
-                    return;
+                    break;
                 }
                 continue;
             }
             LOG_ERROR("Could not wait for fences.");
             assert(false);
             fences.clear();
-            return;
+            break;
         }
+        stat_fence_us += elapsed_us(t0);
     };
 
     while (true) {
@@ -70,6 +80,7 @@ void VKContext::wait_thread_function(const MemState &mem) {
                        },
                        [&](NotificationRequest &request) {
                            if (request.notifications[0].address || request.notifications[1].address) {
+                               stat_notifs++;
                                wait_for_fences();
 
                                const std::shared_lock<std::shared_mutex> transition_lock(mem.external_transition_mutex);
@@ -87,6 +98,7 @@ void VKContext::wait_thread_function(const MemState &mem) {
                            }
                        },
                        [&](FrameDoneRequest &request) {
+                           stat_frames++;
                            wait_for_fences();
 
                            // don't reset them, the reset will be done in the new_frame function
@@ -97,6 +109,7 @@ void VKContext::wait_thread_function(const MemState &mem) {
                            new_frame_condv.notify_one();
                        },
                        [&](BufferSyncRequest &request) {
+                           stat_buffer_syncs++;
                            wait_for_fences();
                            const std::shared_lock<std::shared_mutex> transition_lock(mem.external_transition_mutex);
                            auto mem_it = state.mapped_memories.lower_bound(request.location);
@@ -120,11 +133,13 @@ void VKContext::wait_thread_function(const MemState &mem) {
                            renderer::vulkan::surface_sync_internal_write = false;
                        },
                        [&](PostSurfaceSyncRequest &request) {
+                           const auto post_t0 = std::chrono::steady_clock::now();
                            wait_for_fences();
                            const std::shared_lock<std::shared_mutex> transition_lock(mem.external_transition_mutex);
                            renderer::vulkan::surface_sync_internal_write = true;
                            state.surface_cache.perform_post_surface_sync(mem, request.cache_info);
                            renderer::vulkan::surface_sync_internal_write = false;
+                           stat_post_us += elapsed_us(post_t0);
                        },
                        [&](SyncSignalRequest &request) {
                            wait_for_fences();
@@ -604,16 +619,22 @@ void VKContext::stop_recording(const SceGxmNotification &notif1, const SceGxmNot
             }
         }
 
-        if (surface_info && surface_info->need_post_surface_sync) {
+        // U2F10F10F10 guest write-back is throttled so run it after the notifications
+        const bool post_sync_after_notifications = surface_info && surface_info->need_post_surface_sync && surface_info->format == SCE_GXM_COLOR_BASE_FORMAT_U2F10F10F10;
+
+        if (surface_info && surface_info->need_post_surface_sync && !post_sync_after_notifications) {
             state.request_queue.push(PostSurfaceSyncRequest{ surface_info });
         }
 
         if (notif1.address || notif2.address) {
-            // notifications last
             NotificationRequest request = {
                 .notifications = { notif1, notif2 },
             };
             state.request_queue.push(request);
+        }
+
+        if (post_sync_after_notifications) {
+            state.request_queue.push(PostSurfaceSyncRequest{ surface_info });
         }
     }
 }

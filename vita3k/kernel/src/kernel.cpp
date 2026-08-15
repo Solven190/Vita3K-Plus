@@ -54,6 +54,9 @@ void CorenumAllocator::set_max_core_count(const std::size_t max) {
     alloc.set_maximum(max);
 }
 
+void set_current_thread_state(SceUID id, const ThreadStatePtr &thread);
+void clear_current_thread_state();
+
 // TODO implement cross platform debug thread name setter and eliminate SDL thread
 struct ThreadParams {
     KernelState *kernel = nullptr;
@@ -66,6 +69,7 @@ static int SDLCALL thread_function(void *data) {
     const ThreadParams params = *static_cast<const ThreadParams *>(data);
     SDL_SignalSemaphore(params.host_may_destroy_params);
     const ThreadStatePtr thread = params.kernel->get_thread(params.thid);
+    set_current_thread_state(params.thid, thread);
 #ifdef TRACY_ENABLE
     if (!thread->name.empty()) {
         tracy::SetThreadName(thread->name.c_str());
@@ -77,6 +81,7 @@ static int SDLCALL thread_function(void *data) {
 
     thread->run_loop();
     const uint32_t r0 = read_reg(*thread->cpu, 0);
+    clear_current_thread_state();
 
     {
         std::lock_guard<std::mutex> lock(params.kernel->mutex);
@@ -142,7 +147,22 @@ void KernelState::invalidate_jit_cache(Address start, size_t length) {
     }
 }
 
+static thread_local SceUID tls_self_id = 0;
+static thread_local ThreadStatePtr tls_self;
+
+void set_current_thread_state(SceUID id, const ThreadStatePtr &thread) {
+    tls_self_id = id;
+    tls_self = thread;
+}
+
+void clear_current_thread_state() {
+    tls_self_id = 0;
+    tls_self.reset();
+}
+
 ThreadStatePtr KernelState::get_thread(SceUID thread_id) {
+    if (thread_id == tls_self_id && tls_self)
+        return tls_self;
     return lock_and_find(thread_id, threads, mutex);
 }
 
