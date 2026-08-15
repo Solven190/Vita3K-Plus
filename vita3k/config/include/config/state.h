@@ -71,14 +71,14 @@ struct Config {
 #ifdef __ANDROID__
         std::string custom_driver_name{};
 #endif
-        bool high_accuracy = false;
+        bool high_accuracy = true;
         float resolution_multiplier = 1.0f;
         bool disable_surface_sync = false;
         std::string screen_filter = "Bilinear";
         std::string memory_mapping = "double-buffer";
         bool v_sync = true;
         int anisotropic_filtering = 1;
-        bool async_pipeline_compilation = true;
+        bool async_pipeline_compilation = false;
         bool accurate_thread_scheduling = false;
         int guest_cores = 1;
         bool import_textures = false;
@@ -100,7 +100,7 @@ struct Config {
         bool log_active_shaders = false;
         bool log_uniforms = false;
         bool color_surface_debug = false;
-        bool validation_layer = true;
+        bool validation_layer = false;
         bool tracy_primitive_impl = false;
         std::vector<std::string> tracy_advanced_profiling_modules;
     };

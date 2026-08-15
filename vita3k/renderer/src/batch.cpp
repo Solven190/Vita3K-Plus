@@ -15,11 +15,11 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+#include <array>
+#include <cpu/functions.h>
 #include <renderer/commands.h>
 #include <renderer/driver_functions.h>
 #include <renderer/functions.h>
-#include <array>
-#include <cpu/functions.h>
 #include <renderer/state.h>
 #include <renderer/types.h>
 

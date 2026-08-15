@@ -55,6 +55,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QRadioButton>
+#include <QScreen>
 #include <QSlider>
 #include <QSpinBox>
 #include <QStringList>
@@ -118,8 +119,14 @@ SettingsDialog::SettingsDialog(EmuEnvState &emuenv,
         font_completer->setFilterMode(Qt::MatchContains);
         font_completer->setCaseSensitivity(Qt::CaseInsensitive);
     }
+    constexpr int no_scroll_height = 912;
     if (!m_gui_settings || !restoreGeometry(m_gui_settings->get_value(gui::sd_geometry).toByteArray()))
-        resize(780, 676);
+        resize(780, no_scroll_height);
+    if (height() < no_scroll_height) {
+        const QScreen *dialog_screen = screen() ? screen() : QApplication::primaryScreen();
+        const int usable = dialog_screen ? dialog_screen->availableGeometry().height() - 64 : no_scroll_height;
+        resize(width(), std::max(minimumHeight(), std::min(no_scroll_height, usable)));
+    }
     connect(&m_theme_manager, &ThemeManager::theme_state_changed, this, &SettingsDialog::refresh_themes);
     connect(&m_theme_manager, &ThemeManager::theme_catalog_changed, this, &SettingsDialog::refresh_themes);
     m_ui->settingsCategory->setSpacing(0);

@@ -157,7 +157,7 @@ static bool init_image(Camera *self) {
 }
 
 static bool init_solid_color(Camera *self) {
-    SDL_SurfacePtr image_surface(SDL_CreateSurface(self->info.width, self->info.height, SDL_PIXELFORMAT_ABGR8888));
+    SDL_SurfacePtr image_surface(SDL_CreateSurface(self->info.width, self->info.height, SDL_PIXELFORMAT_ARGB8888));
     if (!image_surface) {
         LOG_ERROR("Failed to create SDL surface for solid color: {}", SDL_GetError());
         return false;
