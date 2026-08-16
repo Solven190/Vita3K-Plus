@@ -329,6 +329,10 @@ static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t inst
 
 void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format,
     Ptr<void> indices, size_t count, uint32_t instance_count, MemState &mem, const Config &config) {
+    // the mask bit is not emulated here, so a mask-update program would just paint writing_mask over the whole target (gl/draw.cpp skips these too)
+    if (!context.state.features.use_mask_bit && context.record.fragment_program.get(mem)->is_maskupdate)
+        return;
+
     void *indices_ptr = indices.get(mem);
 
     if (context.record.front_depth_write_mode == SCE_GXM_DEPTH_WRITE_ENABLED)

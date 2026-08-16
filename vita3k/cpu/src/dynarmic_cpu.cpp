@@ -279,28 +279,82 @@ public:
             loader_lock_mutex.unlock();
     }
 
-    static constexpr Address MONO_LOADER_LOCK = 0x80B67D58;
-    static constexpr Address MONO_LOADER_UNLOCK = 0x80B67D0C;
+    enum class MonoLoaderOp {
+        None,
+        Lock,
+        Unlock,
+    };
 
-    bool mono_loader_lock_matches() {
-        static const bool matched = [this] {
-            static constexpr uint32_t signature[] = {
-                0xe92d4010, // push {r4, lr}
-                0xe30602b0, // movw r0, #0x62b0
-                0xe3480060, // movt r0, #0x8060
-                0xe5900000, // ldr  r0, [r0]
-                0xe3500000, // cmp  r0, #0
-                0x0a00000b, // beq  (epilogue: the lock is compiled out)
-            };
-            for (size_t i = 0; i < std::size(signature); i++) {
-                const Ptr<uint32_t> word{ static_cast<Address>(MONO_LOADER_LOCK + i * 4) };
-                if (!word.valid(*parent->mem) || *word.get(*parent->mem) != signature[i])
-                    return false;
-            }
-            LOG_INFO("Serialising mono's loader lock: mono_loader_lock at 0x{:X} acquires no mutex in this build", MONO_LOADER_LOCK);
-            return true;
-        }();
-        return matched;
+    static constexpr bool is_movw(uint32_t insn, uint32_t rd) {
+        return (insn & 0xFFF0F000) == (0xE3000000 | (rd << 12));
+    }
+    static constexpr bool is_movt(uint32_t insn, uint32_t rd) {
+        return (insn & 0xFFF0F000) == (0xE3400000 | (rd << 12));
+    }
+
+    // Neither mono_loader_lock nor mono_loader_unlock is exported, so they cannot be resolved
+    // by NID, and each mono build places them somewhere different. Recognise them from their own code
+    // instead, as dynarmic translates them. Both are the same 19-instruction body:
+    //
+    //      push {r4, lr}
+    //      movw/movt r0, #<&loader_lock_enabled>   ; immediates vary per build
+    //      ldr  r0, [r0]
+    //      cmp  r0, #0
+    //      beq  epilogue                           ; disabled: no mutex is ever taken
+    //      movw/movt r0, #<&nest_count_tls_key>
+    //      ldr  r4, [r0]
+    //      movw/movt ip, #<&tls_get> ; mov r0, r4 ; blx ip
+    //      movw ip, ... ; add/sub r1, r0, #1       ; the ONLY differing word: +1 lock, -1 unlock
+    //      movt ip, ... ; mov r0, r4 ; blx ip      ; tls_set(key, nest +/- 1)
+    //  epilogue:
+    //      pop  {r4, pc}
+    MonoLoaderOp classify_mono_loader_lock(Dynarmic::A32::VAddr pc) {
+        static constexpr uint32_t PUSH_R4_LR = 0xE92D4010;
+        static constexpr uint32_t LDR_R0_R0 = 0xE5900000;
+        static constexpr uint32_t CMP_R0_0 = 0xE3500000;
+        static constexpr uint32_t BEQ_EPILOGUE = 0x0A00000B; // beq +11 words -> the pop below
+        static constexpr uint32_t LDR_R4_R0 = 0xE5904000;
+        static constexpr uint32_t MOV_R0_R4 = 0xE1A00004;
+        static constexpr uint32_t BLX_IP = 0xE12FFF3C;
+        static constexpr uint32_t ADD_R1_R0_1 = 0xE2801001; // lock:   nest + 1
+        static constexpr uint32_t SUB_R1_R0_1 = 0xE2401001; // unlock: nest - 1
+        static constexpr uint32_t POP_R4_PC = 0xE8BD8010;
+        static constexpr size_t BODY_WORDS = 19;
+
+        const auto word_at = [&](size_t i) -> std::optional<uint32_t> {
+            const Ptr<uint32_t> word{ static_cast<Address>(pc + i * 4) };
+            if (!word.valid(*parent->mem))
+                return std::nullopt;
+            return *word.get(*parent->mem);
+        };
+
+        const auto first = word_at(0);
+        if (!first || *first != PUSH_R4_LR)
+            return MonoLoaderOp::None;
+
+        uint32_t w[BODY_WORDS];
+        w[0] = *first;
+        for (size_t i = 1; i < BODY_WORDS; i++) {
+            const auto word = word_at(i);
+            if (!word)
+                return MonoLoaderOp::None;
+            w[i] = *word;
+        }
+
+        const bool shape = is_movw(w[1], 0) && is_movt(w[2], 0) && w[3] == LDR_R0_R0
+            && w[4] == CMP_R0_0 && w[5] == BEQ_EPILOGUE
+            && is_movw(w[6], 0) && is_movt(w[7], 0) && w[8] == LDR_R4_R0
+            && is_movw(w[9], 12) && is_movt(w[10], 12) && w[11] == MOV_R0_R4 && w[12] == BLX_IP
+            && is_movw(w[13], 12) && is_movt(w[15], 12) && w[16] == MOV_R0_R4 && w[17] == BLX_IP
+            && w[18] == POP_R4_PC;
+        if (!shape)
+            return MonoLoaderOp::None;
+
+        if (w[14] == ADD_R1_R0_1)
+            return MonoLoaderOp::Lock;
+        if (w[14] == SUB_R1_R0_1)
+            return MonoLoaderOp::Unlock;
+        return MonoLoaderOp::None;
     }
 
     // Emitting IR before dynarmic evaluates an instruction's condition makes ir.block non-empty
@@ -316,9 +370,15 @@ public:
     }
 
     void PreCodeTranslationHook(bool is_thumb, Dynarmic::A32::VAddr pc, Dynarmic::A32::IREmitter &ir) override {
-        if ((pc == MONO_LOADER_LOCK || pc == MONO_LOADER_UNLOCK) && mono_loader_lock_matches()) {
-            ir.CallHostFunction(pc == MONO_LOADER_LOCK ? &MonoLoaderLockAcquire : &MonoLoaderLockRelease,
-                ir.Imm64((uint64_t)this), ir.Imm64(0), ir.Imm64(0));
+        if (!is_thumb) {
+            if (const MonoLoaderOp op = classify_mono_loader_lock(pc); op != MonoLoaderOp::None) {
+                static std::once_flag announced;
+                std::call_once(announced, [pc] {
+                    LOG_INFO("Serialising mono's loader lock: found it at 0x{:X}, and it takes no mutex in this build", pc);
+                });
+                ir.CallHostFunction(op == MonoLoaderOp::Lock ? &MonoLoaderLockAcquire : &MonoLoaderLockRelease,
+                    ir.Imm64((uint64_t)this), ir.Imm64(0), ir.Imm64(0));
+            }
         }
         if (cpu->log_code && !may_be_conditional(is_thumb, pc, ir)) {
             ir.CallHostFunction(&TraceInstruction, ir.Imm64((uint64_t)this), ir.Imm64(pc), ir.Imm64(is_thumb));
