@@ -26,6 +26,7 @@ layout(push_constant) uniform PushConstants {
     uint scaled_store_h; // store rows at the current resolution
     uint ratio;          // bppStore / bppReq  (== 2 here)
     uint half_index;     // which 32-bit word of each store texel this view reads
+    uint interleave;     // 1 = interleave both words per column, 0 = duplicate word[half_index]
 } pc;
 
 layout(set = 0, binding = 0) uniform usampler2D u_store;
@@ -46,7 +47,15 @@ void main() {
         ys = pc.scaled_store_h - 1u;
 
     const uvec2 words = texelFetch(u_store, ivec2(int(s), int(ys)), 0).xy;
-    const uint word = (pc.half_index == 0u) ? words.x : words.y;
+    // Two cast layouts, chosen by the caller per consumer style:
+    //  interleave=1: cast[2j] = lo word, cast[2j+1] = hi word of store texel j — for games
+    //    that bind ONE view and select the word with half-texel UV offsets (COD:BOD,
+    //    Resistance; paired with the shader-side UV re-anchor at res multipliers != 1).
+    //  interleave=0: every column = word[half_index] — for games that bind a separate
+    //    byte-offset view per word and sample with plain UVs (AC3L); any UV then lands on
+    //    the word that view addresses, at any resolution.
+    const uint word_idx = (pc.interleave != 0u) ? (x % pc.ratio) : pc.half_index;
+    const uint word = (word_idx == 0u) ? words.x : words.y;
 
     imageStore(u_cast, ivec2(int(x), int(y)), uvec4(word, 0u, 0u, 0u));
 }
