@@ -19,7 +19,6 @@
 #include <cpu/functions.h>
 
 #include <algorithm>
-#include <atomic>
 #include <cpu/impl/dynarmic_cpu.h>
 #include <cpu/impl/interface.h>
 #include <cpu/state.h>

@@ -303,12 +303,24 @@ public:
         return matched;
     }
 
+    // Emitting IR before dynarmic evaluates an instruction's condition makes ir.block non-empty
+    bool may_be_conditional(bool is_thumb, Dynarmic::A32::VAddr pc, Dynarmic::A32::IREmitter &ir) {
+        if (is_thumb)
+            return ir.current_location.IT().IsInITBlock();
+
+        const auto insn = MemoryReadCode(pc);
+        if (!insn)
+            return true; // unreadable: assume the worst rather than risk the loop
+        // 0xE is AL, 0xF the unconditional encoding space; everything else is a real condition
+        return (*insn >> 28) < 0xE;
+    }
+
     void PreCodeTranslationHook(bool is_thumb, Dynarmic::A32::VAddr pc, Dynarmic::A32::IREmitter &ir) override {
         if ((pc == MONO_LOADER_LOCK || pc == MONO_LOADER_UNLOCK) && mono_loader_lock_matches()) {
             ir.CallHostFunction(pc == MONO_LOADER_LOCK ? &MonoLoaderLockAcquire : &MonoLoaderLockRelease,
                 ir.Imm64((uint64_t)this), ir.Imm64(0), ir.Imm64(0));
         }
-        if (cpu->log_code) {
+        if (cpu->log_code && !may_be_conditional(is_thumb, pc, ir)) {
             ir.CallHostFunction(&TraceInstruction, ir.Imm64((uint64_t)this), ir.Imm64(pc), ir.Imm64(is_thumb));
         }
     }
@@ -557,6 +569,26 @@ DynarmicCPU::DynarmicCPU(CPUState *state, std::size_t processor_id, bool cpu_opt
 DynarmicCPU::~DynarmicCPU() = default;
 
 int DynarmicCPU::run() {
+    // apply deferred logging changes now safely outside of jit->Run()
+    if (has_pending_log_code || has_pending_log_mem) {
+        bool rebuild = false;
+        if (has_pending_log_code) {
+            has_pending_log_code = false;
+            if (log_code != pending_log_code) {
+                log_code = pending_log_code;
+                rebuild = true;
+            }
+        }
+        if (has_pending_log_mem) {
+            has_pending_log_mem = false;
+            if (log_mem != pending_log_mem) {
+                log_mem = pending_log_mem;
+                rebuild = true;
+            }
+        }
+        if (rebuild)
+            rebuild_jit();
+    }
     halted = false;
     break_ = false;
     crashed = false;
@@ -587,20 +619,26 @@ void DynarmicCPU::trigger_breakpoint() {
     stop();
 }
 
+void DynarmicCPU::rebuild_jit() {
+    const CPUContext ctx = save_context();
+    jit = make_jit();
+    load_context(ctx);
+}
+
 void DynarmicCPU::set_log_code(bool log) {
     if (log_code == log)
         return;
 
-    log_code = log;
-    jit = make_jit();
+    pending_log_code = log;
+    has_pending_log_code = true;
 }
 
 void DynarmicCPU::set_log_mem(bool log) {
     if (log_mem == log)
         return;
 
-    log_mem = log;
-    jit = make_jit();
+    pending_log_mem = log;
+    has_pending_log_mem = true;
 }
 
 bool DynarmicCPU::get_log_code() {

@@ -121,8 +121,9 @@ EXPORT(int, _sceIoOpen, const char *file, const int flags, const SceMode mode) {
     if (file == nullptr) {
         return RET_ERROR(SCE_ERROR_ERRNO_EINVAL);
     }
-    LOG_INFO("Opening file: {}", file);
-    return open_file(emuenv.io, file, flags, emuenv.vita_fs_path, export_name);
+    const auto opened_fd = open_file(emuenv.io, file, flags, emuenv.vita_fs_path, export_name);
+    LOG_INFO("Opening file: {} -> {}", file, opened_fd < 0 ? fmt::format("FAILED {}", log_hex(static_cast<uint32_t>(opened_fd))) : fmt::format("fd {}", opened_fd));
+    return opened_fd;
 }
 
 EXPORT(int, _sceIoOpenAsync) {
@@ -130,9 +131,9 @@ EXPORT(int, _sceIoOpenAsync) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, _sceIoPread) {
-    TRACY_FUNC(_sceIoPread);
-    return UNIMPLEMENTED();
+EXPORT(SceSSize, _sceIoPread, SceUID fd, void *buf, SceSize nbyte, SceOff offset) {
+    TRACY_FUNC(_sceIoPread, fd, buf, nbyte, offset);
+    return read_file_at(buf, emuenv.io, fd, nbyte, offset, export_name);
 }
 
 EXPORT(int, _sceIoPreadAsync) {
@@ -140,9 +141,9 @@ EXPORT(int, _sceIoPreadAsync) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, _sceIoPwrite) {
-    TRACY_FUNC(_sceIoPwrite);
-    return UNIMPLEMENTED();
+EXPORT(SceSSize, _sceIoPwrite, SceUID fd, const void *buf, SceSize nbyte, SceOff offset) {
+    TRACY_FUNC(_sceIoPwrite, fd, buf, nbyte, offset);
+    return write_file_at(fd, buf, nbyte, offset, emuenv.io, export_name);
 }
 
 EXPORT(int, _sceIoPwriteAsync) {

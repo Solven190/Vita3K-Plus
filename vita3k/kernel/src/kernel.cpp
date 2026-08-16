@@ -99,6 +99,7 @@ KernelState::KernelState()
 
 bool KernelState::init(MemState &mem, const CallImportFunc &call_import, bool cpu_opt) {
     corenum_allocator.set_max_core_count(MAX_CORE_COUNT);
+
     start_tick = rtc_get_ticks(rtc_base_ticks());
     base_tick = { rtc_base_ticks() };
     this->call_import = call_import;

@@ -135,6 +135,7 @@ struct KernelState {
     std::mutex export_nids_mutex;
     ExportNids export_nids;
     FuncBindingInfos func_binding_infos;
+    std::unordered_map<uint32_t, std::string> nid_libraries;
     VarBindingInfos var_binding_infos;
     ModuleUidByNid module_uid_by_nid;
 

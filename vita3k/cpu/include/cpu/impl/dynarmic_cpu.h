@@ -44,9 +44,14 @@ class DynarmicCPU : public CPUInterface {
 
     bool log_mem = false;
     bool log_code = false;
+    bool pending_log_code = false;
+    bool pending_log_mem = false;
+    bool has_pending_log_code = false;
+    bool has_pending_log_mem = false;
     bool cpu_opt;
 
     std::unique_ptr<Dynarmic::A32::Jit> make_jit();
+    void rebuild_jit();
 
 public:
     DynarmicCPU(CPUState *state, std::size_t processor_id, bool cpu_opt);
