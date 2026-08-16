@@ -18,8 +18,8 @@
 #include "SceProcessmgr.h"
 
 #include <io/functions.h>
-#include <modules/module_parent.h>
 #include <kernel/state.h>
+#include <modules/module_parent.h>
 #include <rtc/rtc.h>
 
 #include <util/safe_time.h>
