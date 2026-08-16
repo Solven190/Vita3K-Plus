@@ -202,7 +202,7 @@ namespace {
 std::mutex g_sched_mutex;
 std::condition_variable g_sched_cv;
 constexpr size_t GUEST_CORES_MAX = 4;
-constexpr auto SCHED_DEADLINE = std::chrono::milliseconds(2);
+constexpr auto SCHED_DEADLINE_WINDOW = std::chrono::milliseconds(2);
 constexpr auto SCHED_MIN_SLICE = std::chrono::microseconds(50);
 constexpr auto SCHED_TIMESLICE = std::chrono::microseconds(250);
 
@@ -322,7 +322,7 @@ void sched_acquire(int priority, SceInt32 affinity_mask, bool enabled, CPUState 
     };
     preempt_lower(start);
 
-    const auto deadline = start + SCHED_DEADLINE;
+    const auto deadline = start + SCHED_DEADLINE_WINDOW;
     while (g_sched_running >= g_sched_cores || g_sched_best_waiter.load(std::memory_order_relaxed) < priority) {
         if (g_sched_cv.wait_until(lock, deadline) == std::cv_status::timeout) {
             g_sched_forced.fetch_add(1, std::memory_order_relaxed);
@@ -338,7 +338,7 @@ void sched_acquire(int priority, SceInt32 affinity_mask, bool enabled, CPUState 
                     if (h.cpu)
                         holder_prio = h.priority;
                 }
-                LOG_WARN("[GUEST-SCHED] \"{}\" (#{} prio {}) forced through after {}ms; holder prio {}", name, id, priority, std::chrono::duration_cast<std::chrono::milliseconds>(SCHED_DEADLINE).count(), holder_prio);
+                LOG_WARN("[GUEST-SCHED] \"{}\" (#{} prio {}) forced through after {}ms; holder prio {}", name, id, priority, std::chrono::duration_cast<std::chrono::milliseconds>(SCHED_DEADLINE_WINDOW).count(), holder_prio);
             }
             break;
         }

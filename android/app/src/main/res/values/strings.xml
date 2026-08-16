@@ -408,6 +408,13 @@
     <string name="settings_gpu_turbo_mode_desc">Provides a way to force the GPU to run at the maximum possible clocks. Thermal constraints will still be applied.</string>
     <string name="settings_gpu_shader_cache">Enable Shader Cache</string>
     <string name="settings_gpu_shader_cache_desc">Enable shader caching. Reduces stuttering on subsequent runs.</string>
+    <string name="settings_gpu_clear_shader_cache">Clear Shader Cache</string>
+    <string name="settings_gpu_clear_shader_cache_summary">Deletes cached shaders for all games</string>
+    <string name="settings_gpu_clear_shader_cache_action">Clear</string>
+    <string name="settings_gpu_clear_shader_cache_desc">Deletes the compiled shader cache for every game. Shaders are recompiled the next time each game runs, so the first run after clearing will stutter more. Use this if a game renders incorrectly after an emulator update. To clear a single game instead, use Shader Cache in that game\'s menu.</string>
+    <string name="settings_gpu_clear_shader_cache_confirm">Delete cached shaders for all games. They will be recompiled the next time each game runs.</string>
+    <string name="settings_gpu_clear_shader_cache_done">Shader cache cleared.</string>
+    <string name="settings_gpu_clear_shader_cache_empty">There was no shader cache to clear.</string>
     <string name="settings_gpu_spirv_shader">Use SPIR-V Shader (deprecated)</string>
     <string name="settings_gpu_spirv_shader_desc">Pass generated Spir-V shader directly to driver.\nNote that some beneficial extensions will be disabled, and not all GPUs are compatible with this.</string>
     <string name="settings_gpu_memory_mapping">Memory Mapping</string>

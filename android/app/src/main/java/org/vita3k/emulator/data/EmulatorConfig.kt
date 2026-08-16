@@ -15,14 +15,14 @@ class EmulatorConfig {
 
     // GPU
     @JvmField var backendRenderer: String = "Vulkan"
-    @JvmField var highAccuracy: Boolean = false
+    @JvmField var highAccuracy: Boolean = true
     @JvmField var resolutionMultiplier: Float = 1.0f
-    @JvmField var disableSurfaceSync: Boolean = true
+    @JvmField var disableSurfaceSync: Boolean = false
     @JvmField var screenFilter: String = "Bilinear"
     @JvmField var memoryMapping: String = "double-buffer"
     @JvmField var vSync: Boolean = true
     @JvmField var anisotropicFiltering: Int = 1
-    @JvmField var asyncPipelineCompilation: Boolean = true
+    @JvmField var asyncPipelineCompilation: Boolean = false
     @JvmField var exportTextures: Boolean = false
     @JvmField var importTextures: Boolean = false
     @JvmField var exportAsPng: Boolean = true
@@ -78,7 +78,7 @@ class EmulatorConfig {
     @JvmField var logUniforms: Boolean = false
     @JvmField var colorSurfaceDebug: Boolean = false
     @JvmField var dumpElfs: Boolean = false
-    @JvmField var validationLayer: Boolean = true
+    @JvmField var validationLayer: Boolean = false
     @JvmField var textureCache: Boolean = true
     @JvmField var stretchDisplayArea: Boolean = false
     @JvmField var fullscreenHdResPixelPerfect: Boolean = false
