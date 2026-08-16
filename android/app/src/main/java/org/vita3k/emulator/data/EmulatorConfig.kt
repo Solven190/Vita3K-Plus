@@ -87,8 +87,8 @@ class EmulatorConfig {
     // Emulator
     @JvmField var showLiveAreaScreen: Boolean = false
     @JvmField var showCompileShaders: Boolean = true
-    @JvmField var checkForUpdates: Boolean = true
-    @JvmField var checkForUpdatesMode: Int = 1
+    @JvmField var checkForUpdates: Boolean = false
+    @JvmField var checkForUpdatesMode: Int = 0
     @JvmField var archiveLog: Boolean = false
     @JvmField var logCompatWarn: Boolean = false
     @JvmField var logLevel: Int = 0
