@@ -828,7 +828,8 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
             features.support_shader_interlock = support_shader_interlock;
         }
 
-        features.preserve_f16_nan_as_u16 = features.support_shader_interlock && static_cast<bool>(physical_device_features.independentBlend);
+        constexpr bool raw_preserve_needs_interlock = false;
+        features.preserve_f16_nan_as_u16 = static_cast<bool>(physical_device_features.independentBlend) && (!raw_preserve_needs_interlock || features.support_shader_interlock);
 
         // depth clamp turns off z-clipping, so behind-the-eye primitives must be clipped in the shader instead
         features.support_clip_distance = enable_depth_clamp && static_cast<bool>(physical_device_features.depthClamp) && static_cast<bool>(physical_device_features.shaderClipDistance);
@@ -1127,9 +1128,9 @@ void VKState::log_gpu_configuration(const Config &cfg) {
 
     LOG_INFO("  renderer flags: support_rasterized_order_access={} support_fsr={} support_standard_layout={} deep_stencil={}",
         support_rasterized_order_access, support_fsr, support_standard_layout, vk::to_string(deep_stencil_use));
-    LOG_INFO("  FeatureState: support_shader_interlock={} support_texture_barrier={} direct_fragcolor={} preserve_f16_nan_as_u16={}",
+    LOG_INFO("  FeatureState: support_shader_interlock={} support_texture_barrier={} direct_fragcolor={} preserve_f16_nan_as_u16={} independentBlend={}",
         features.support_shader_interlock, features.support_texture_barrier, features.direct_fragcolor,
-        features.preserve_f16_nan_as_u16);
+        features.preserve_f16_nan_as_u16, static_cast<bool>(physical_device_features.independentBlend));
     LOG_INFO("  FeatureState: use_mask_bit={} support_unknown_format={} support_rgb_attributes={} support_scaled_attribute_formats={}",
         features.use_mask_bit, features.support_unknown_format, features.support_rgb_attributes,
         features.support_scaled_attribute_formats);

@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilledTonalButton
@@ -19,9 +20,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -31,6 +34,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import org.vita3k.emulator.NativeLib
 import org.vita3k.emulator.R
 import org.vita3k.emulator.ConnectedGamepad
 import org.vita3k.emulator.data.CustomDriverLoadStatus
@@ -753,6 +757,63 @@ private fun GpuSettingsSection(
                 ),
                 onShowHelp = onShowHelp
             )
+            if (!isPerApp) {
+                // Clears every title's cache, like the desktop button. A single title can be
+                // cleared from its own entry in the app list (AppAction.DELETE_SHADER_CACHE).
+                var confirmClearShaderCache by remember { mutableStateOf(false) }
+                var clearShaderCacheResult by remember { mutableStateOf<Boolean?>(null) }
+                val clearTitle = stringResource(R.string.settings_gpu_clear_shader_cache)
+                SettingsActionRow(
+                    title = clearTitle,
+                    value = stringResource(R.string.settings_gpu_clear_shader_cache_summary),
+                    onClick = { confirmClearShaderCache = true },
+                    actionLabel = stringResource(R.string.settings_gpu_clear_shader_cache_action),
+                    onActionClick = { confirmClearShaderCache = true },
+                    help = SettingsHelpEntry(
+                        title = clearTitle,
+                        body = stringResource(R.string.settings_gpu_clear_shader_cache_desc),
+                        scope = SettingsScope.Global
+                    ),
+                    onShowHelp = onShowHelp
+                )
+                if (confirmClearShaderCache) {
+                    AlertDialog(
+                        onDismissRequest = { confirmClearShaderCache = false },
+                        title = { Text(clearTitle) },
+                        text = { Text(stringResource(R.string.settings_gpu_clear_shader_cache_confirm)) },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                confirmClearShaderCache = false
+                                clearShaderCacheResult = NativeLib.clearShaderCache()
+                            }) { Text(stringResource(R.string.settings_gpu_clear_shader_cache_action)) }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { confirmClearShaderCache = false }) {
+                                Text(stringResource(R.string.action_cancel))
+                            }
+                        }
+                    )
+                }
+                clearShaderCacheResult?.let { cleared ->
+                    AlertDialog(
+                        onDismissRequest = { clearShaderCacheResult = null },
+                        title = { Text(clearTitle) },
+                        text = {
+                            Text(
+                                stringResource(
+                                    if (cleared) R.string.settings_gpu_clear_shader_cache_done
+                                    else R.string.settings_gpu_clear_shader_cache_empty
+                                )
+                            )
+                        },
+                        confirmButton = {
+                            TextButton(onClick = { clearShaderCacheResult = null }) {
+                                Text(stringResource(R.string.action_ok))
+                            }
+                        }
+                    )
+                }
+            }
             if (isVulkan) {
                 SettingsToggleRow(
                     title = stringResource(R.string.settings_gpu_spirv_shader),
