@@ -106,7 +106,7 @@ SettingsDialog::SettingsDialog(EmuEnvState &emuenv,
     setWindowFlag(Qt::WindowCloseButtonHint, true);
     setWindowFlag(Qt::WindowContextHelpButtonHint, false);
     setAttribute(Qt::WA_DeleteOnClose);
-    setWindowIcon(QIcon(QStringLiteral(":/Vita3K.png")));
+    setWindowIcon(QIcon(QStringLiteral(":/Vita3KPlus.png")));
     m_ui->tab_widget_settings->tabBar()->hide();
     m_ui->log_font_family->setEditable(true);
     m_ui->log_font_family->setInsertPolicy(QComboBox::NoInsert);

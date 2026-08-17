@@ -808,7 +808,7 @@ private fun AboutSheet(
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Image(
-                painter = painterResource(id = R.mipmap.ic_launcher),
+                painter = painterResource(id = R.mipmap.ic_launcher_plus),
                 contentDescription = stringResource(R.string.apps_list_app_title),
                 modifier = Modifier
                     .size(132.dp)
