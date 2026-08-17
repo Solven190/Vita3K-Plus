@@ -12,7 +12,7 @@ A fork of Vita3K with additional game compatibility and rendering fixes. All cre
 - **Call of Duty: Declassified** Boots and plays well now
 - **Uncharted** Now plays at any resolution plus minor fixes
 - **Devious Dungeon** Now launches fine
-- **Sonic Transformed** Plays well and looks amazing
+- **Sonic Transformed** Plays well and looks amazing (new per game thread accuracy setting to ensure a good startup)
 - **Spider-Man** No longer sometimes hangs on load.
 - **Helldivers** No longer sometimes crashes at startup
 - **Soul Sacrifice Delta**: Graphical issues fixed
@@ -20,6 +20,11 @@ A fork of Vita3K with additional game compatibility and rendering fixes. All cre
 - **Kancolle Kai** Now plays without getting stuck at the difficulty selection screen
   
 Hopefully a lot of crash bugs and freezing have been fixed by these changes. Other games may now be a lot better or possibly worse with this version.
+
+## Notes
+
+The settings now default to High Quality. These updates were designed with higher-end devices in mind. Although I have attempted to make them work and tested on Mali based devices (i.e. Killzone works fine on a Mali-G78 MP14 device I have) that is not the goal of this fork.
+For better character shadows in Killzone use a memory mapping of External Host on Windows or Native Buffer on Android. Double Buffer works well but makes the shadows flicker annonyingly.
 
 ## New Screenshots
 
