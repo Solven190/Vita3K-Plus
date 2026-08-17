@@ -23,8 +23,9 @@ Hopefully a lot of crash bugs and freezing have been fixed by these changes. Oth
 
 ## Notes
 
-The settings now default to High Quality. These updates were designed with higher-end devices in mind. Although I have attempted to make them work and tested on Mali based devices (i.e. Killzone works fine on a Mali-G78 MP14 device I have) that is not the goal of this fork.
-For better character shadows in Killzone use a memory mapping of External Host on Windows or Native Buffer on Android. Double Buffer works well but makes the shadows flicker annonyingly.
+- The settings now default to High Quality
+- These updates were designed with higher-end devices in mind. Although I have attempted to make them work and tested on Mali based devices (i.e. Killzone works fine on a Mali-G78 MP14 device I have) that is not the goal of this fork.
+- For better character shadows in Killzone use a memory mapping of External Host on Windows or Native Buffer on Android. Double Buffer works well but makes the shadows flicker annonyingly.
 
 ## New Screenshots
 
