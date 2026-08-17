@@ -222,9 +222,8 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
         force_load = false;
         force_store = false;
     }
-    if (context.state.features.support_shader_interlock)
-        // we must always store the depth stencil
-        force_store = true;
+    // GXM force_store controls write-back to the depth surface memory, not whether the buffer keeps its contents
+    force_store = true;
 
     bool depth_load = force_load;
     bool stencil_load = force_load;

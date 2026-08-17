@@ -193,8 +193,8 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(std::string, "user-lang", std::string{}, user_lang)                                            \
     code(bool, "show-welcome", true, show_welcome)                                                      \
     code(bool, "warn-missing-firmware", true, warn_missing_firmware)                                    \
-    code(bool, "check-for-updates", true, check_for_updates)                                            \
-    code(int, "check-for-updates-mode", static_cast<int>(UPDATE_STARTUP_PROMPT), check_for_updates_mode)\
+    code(bool, "check-for-updates", false, check_for_updates)                                           \
+    code(int, "check-for-updates-mode", static_cast<int>(UPDATE_STARTUP_OFF), check_for_updates_mode)   \
     code(int, "file-loading-delay", 0, file_loading_delay)                                              \
     code(bool, "shader-cache", true, shader_cache)                                                      \
     code(bool, "spirv-shader", false, spirv_shader)                                                     \
