@@ -1,3 +1,33 @@
+# Vita3K+
+
+A fork of Vita3K with additional game compatibility and rendering fixes. All credit for the emulator itself belongs to the Vita3K team.
+
+## Enhancements
+
+- **Killzone** Plays well and looks amazing
+- **Resistance** Colours are now all good. Intermittent freezing has been fixed.
+- **Assassin's Creed III: Liberation**: Graphical issues fixed
+- **LittleBigPlanet**: Missing backgrounds, starting sounds and other graphics fixed
+- **Need for Speed: Most Wanted**: floating badges fixed, headlights through the road fixed, sound fixed (mostly).
+- **Call of Duty: Declassified** Boots and plays well now
+- **Uncharted** Now plays at any resolution plus minor fixes
+- **Devious Dungeon** Now launches fine
+- **Sonic Transformed** Plays well and looks amazing
+- **Spider-Man** No longer sometimes hangs on load.
+- **Helldivers** No longer sometimes crashes at startup
+- **Soul Sacrifice Delta**: Graphical issues fixed
+- **Minecraft** was a white screen in Vulkan, now fixed
+- **Kancolle Kai** Now plays without getting stuck at the difficulty selection screen
+  
+Hopefully a lot of crash bugs and freezing have been fixed by these changes. Other games may now be a lot better or possibly worse with this version.
+
+## New Screenshots
+
+
+
+Below is the original Vita3k's README:
+---
+
 # Vita3K
 
 [![C/C++ CI](https://github.com/Vita3K/Vita3K/actions/workflows/c-cpp.yml/badge.svg)](https://github.com/Vita3K/Vita3K/actions/workflows/c-cpp.yml)
