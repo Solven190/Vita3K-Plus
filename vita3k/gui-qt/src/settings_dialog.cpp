@@ -1085,6 +1085,7 @@ void SettingsDialog::setup_connections() {
         if (color.isValid()) {
             emuenv.cfg.front_camera_color = color.rgba();
             update_camera_color_preview();
+            mark_dirty();
         }
     });
     connect(m_ui->back_camera_color_btn, &QPushButton::clicked, this, [this] {
@@ -1093,6 +1094,7 @@ void SettingsDialog::setup_connections() {
         if (color.isValid()) {
             emuenv.cfg.back_camera_color = color.rgba();
             update_camera_color_preview();
+            mark_dirty();
         }
     });
 
@@ -1104,6 +1106,7 @@ void SettingsDialog::setup_connections() {
         if (!file.isEmpty()) {
             emuenv.cfg.front_camera_image = file.toUtf8();
             m_ui->front_camera_image_path->setText(file);
+            mark_dirty();
         }
     });
     connect(m_ui->back_camera_image_btn, &QPushButton::clicked, this, [this] {
@@ -1114,6 +1117,7 @@ void SettingsDialog::setup_connections() {
         if (!file.isEmpty()) {
             emuenv.cfg.back_camera_image = file.toUtf8();
             m_ui->back_camera_image_path->setText(file);
+            mark_dirty();
         }
     });
 
