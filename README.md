@@ -29,7 +29,9 @@ Hopefully a lot of crash bugs and freezing have been fixed by these changes. Oth
 
 ## New Screenshots
 
+See the **[Screenshots page](./Screenshots.md)** for the games above running in Vita3K+.
 
+[![Vita3K+ screenshots](./screenshots/KZ.jpg)](./Screenshots.md)
 
 Below is the original Vita3k's README:
 ---
