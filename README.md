@@ -2,6 +2,10 @@
 
 A fork of Vita3K with additional game compatibility and rendering fixes. All credit for the emulator itself belongs to the Vita3K team.
 
+## Download
+
+https://github.com/nckstwrt/Vita3K-Plus/releases
+
 ## Enhancements
 
 - **Killzone** Plays well and looks amazing
