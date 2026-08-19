@@ -37,6 +37,9 @@ See the **[Screenshots page](./Screenshots.md)** for the games above running in 
 
 [![Vita3K+ screenshots](./screenshots/KZ.jpg)](./Screenshots.md)
 
+## Code Changes
+Check the all-enhancements branch for the all code changes
+
 Below is the original Vita3k's README:
 ---
 
