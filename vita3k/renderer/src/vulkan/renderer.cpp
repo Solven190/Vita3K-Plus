@@ -742,14 +742,17 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
         }
 
         bool support_memory_mapping = true;
+        const bool has_features2_khr = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetPhysicalDeviceFeatures2KHR != nullptr;
+        support_buffer_device_address &= has_features2_khr;
+        support_standard_layout &= has_features2_khr;
         if (support_buffer_device_address) {
-            auto features = physical_device.getFeatures2<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceBufferDeviceAddressFeatures>();
+            auto features = physical_device.getFeatures2KHR<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceBufferDeviceAddressFeatures>();
             support_buffer_device_address &= static_cast<bool>(features.get<vk::PhysicalDeviceBufferDeviceAddressFeatures>().bufferDeviceAddress);
         }
         support_memory_mapping &= support_buffer_device_address;
 
         if (support_standard_layout) {
-            auto features = physical_device.getFeatures2<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceUniformBufferStandardLayoutFeatures>();
+            auto features = physical_device.getFeatures2KHR<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceUniformBufferStandardLayoutFeatures>();
             support_standard_layout &= static_cast<bool>(features.get<vk::PhysicalDeviceUniformBufferStandardLayoutFeatures>().uniformBufferStandardLayout);
         }
         support_memory_mapping &= support_standard_layout;
@@ -1539,6 +1542,10 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
     };
 
     auto find_suitable_mapped_type = [&](uint32_t hardware_types) {
+        if (hardware_types == 0) {
+            LOG_ERROR("Imported memory reports no compatible memory types");
+            return 0u;
+        }
         // first try to find a memory that is both coherent and cached
         int mapped_memory_type = find_mem_type_with_flag(vk::MemoryPropertyFlagBits::eHostCoherent | vk::MemoryPropertyFlagBits::eHostCached, hardware_types);
         if (mapped_memory_type == -1)

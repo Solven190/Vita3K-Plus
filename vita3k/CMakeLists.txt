@@ -2,10 +2,11 @@ set(VITA3K_ORG_NAME "Vita3K")
 # APP_NAME is the on-disk data folder name, keep it: DISPLAY_NAME is what the user sees
 set(VITA3K_APP_NAME "Vita3K")
 set(VITA3K_DISPLAY_NAME "Vita3K+")
-set(VITA3K_APP_VER_HI 0)
-set(VITA3K_APP_VER_MID 2)
-set(VITA3K_APP_VER_LO 1)
-set(VITA3K_APP_VERSION "v${VITA3K_APP_VER_HI}.${VITA3K_APP_VER_MID}.${VITA3K_APP_VER_LO}")
+set(VITA3K_APP_VER_HI 1)
+set(VITA3K_APP_VER_MID 1)
+set(VITA3K_APP_VER_LO 0)
+# two-component display version (v1.1): the numeric LO still feeds the exe FILE_VERSION resource  // Nick - Version
+set(VITA3K_APP_VERSION "v${VITA3K_APP_VER_HI}.${VITA3K_APP_VER_MID}")
 
 execute_process(
 	COMMAND git rev-list HEAD --count
