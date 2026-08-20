@@ -1,5 +1,7 @@
 set(VITA3K_ORG_NAME "Vita3K")
+# APP_NAME is the on-disk data folder name, keep it: DISPLAY_NAME is what the user sees
 set(VITA3K_APP_NAME "Vita3K")
+set(VITA3K_DISPLAY_NAME "Vita3K+")
 set(VITA3K_APP_VER_HI 0)
 set(VITA3K_APP_VER_MID 2)
 set(VITA3K_APP_VER_LO 1)
@@ -365,7 +367,7 @@ elseif(LINUX)
 	endif()
 elseif(WIN32)
 	target_link_libraries(vita3k PRIVATE Version)
-	target_sources(vita3k PRIVATE resource.h Vita3K.ico Vita3K.rc Windows.manifest)
+	target_sources(vita3k PRIVATE resource.h Vita3KPlus.ico Vita3K.rc Windows.manifest)
 	set_property(DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT vita3k)
 	set_target_properties(vita3k PROPERTIES WIN32_EXECUTABLE TRUE VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$(Configuration)")
 	add_custom_command(
