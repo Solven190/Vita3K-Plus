@@ -1037,7 +1037,7 @@ private fun UpdateCheckDialog(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
-    val defaultDownloadUrl = "https://github.com/Vita3K/Vita3K/releases/tag/continuous"
+    val defaultDownloadUrl = "https://github.com/nckstwrt/Vita3K-Plus/releases/latest"
     val latestVersion = result.info.version.ifBlank {
         if (result.info.buildNumber > 0L) "Build ${result.info.buildNumber}" else stringResource(R.string.updates_latest_build)
     }

@@ -156,6 +156,7 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(bool, "high-accuracy", true, high_accuracy)                                                   \
     code(std::string, "tu-debug", "", tu_debug)                                                     \
     code(bool, "disable-raster-order", false, disable_raster_order)                                \
+    code(bool, "disable-programmable-blending", false, disable_programmable_blending)               \
     code(float, "resolution-multiplier", 1.0f, resolution_multiplier)                                   \
     code(bool, "disable-surface-sync", false, disable_surface_sync)                                      \
     code(bool, "surface-sync-clamp-rt", true, surface_sync_clamp_rt)                               \

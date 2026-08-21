@@ -1028,6 +1028,15 @@ void VKState::late_init(const Config &cfg, const std::string_view game_id, MemSt
         features.support_shader_interlock = false;
     }
 
+    // Diagnostic/workaround: without VK_EXT/ARM_rasterization_order_attachment_access, overlapping
+    // primitives inside ONE draw have no defined order when the shader reads the colour attachment
+    // (the per-draw barrier in scene.cpp only orders BETWEEN draws). On such devices this can corrupt
+    // framebuffer-fetch draws; turning the emulation off loses blending accuracy but removes the race.
+    if (cfg.disable_programmable_blending && features.direct_fragcolor) {
+        LOG_INFO("Programmable blending emulation disabled by config (framebuffer fetch will read nothing)");
+        features.direct_fragcolor = false;
+    }
+
     // texture viewport is faster but not entirely accurate
     if (support_standard_layout && !use_high_accuracy) {
         LOG_INFO("The Vulkan renderer is using texture viewport for better performance");
@@ -1547,10 +1556,15 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
         return -1;
     };
 
-    auto find_suitable_mapped_type = [&](uint32_t hardware_types) {
+    // returns -1 when the imported memory has no host-coherent type: the caller must NOT import it.
+    // Memory mapping writes guest data straight through the mapped pointer and expects the GPU to
+    // observe it without any flush, so a non-coherent import silently feeds the GPU stale
+    // vertex/index/uniform data (broken geometry). Mali-G52 driver 27.0.0 reports exactly this for
+    // AHardwareBuffer imports, hence the page-table fallback at the call sites.
+    auto find_suitable_mapped_type = [&](uint32_t hardware_types) -> int {
         if (hardware_types == 0) {
             LOG_ERROR("Imported memory reports no compatible memory types");
-            return 0u;
+            return -1;
         }
         // first try to find a memory that is both coherent and cached
         int mapped_memory_type = find_mem_type_with_flag(vk::MemoryPropertyFlagBits::eHostCoherent | vk::MemoryPropertyFlagBits::eHostCached, hardware_types);
@@ -1558,14 +1572,15 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
             // then only coherent (lower performance)
             mapped_memory_type = find_mem_type_with_flag(vk::MemoryPropertyFlagBits::eHostCoherent, hardware_types);
 
-        if (mapped_memory_type == -1) {
-            static bool has_happened = false;
-            LOG_CRITICAL_IF(!has_happened, "No coherent memory available for memory mapping!");
-            has_happened = true;
-            mapped_memory_type = std::countr_zero(hardware_types);
-        }
+        return mapped_memory_type;
+    };
 
-        return static_cast<uint32_t>(mapped_memory_type);
+    // counted, not one-shot: this fires per mapping and the count is what tells us it is systemic
+    auto report_no_coherent = [](const char *kind) {
+        static std::atomic<uint32_t> no_coherent_count{ 0 };
+        const uint32_t n = no_coherent_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 3 || (n % 100) == 0)
+            LOG_WARN("No host-coherent memory type for {} import ({} so far): using page-table mapping for this range instead", kind, n);
     };
 
     switch (mapping_method) {
@@ -1600,11 +1615,17 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
             if (support_android_buffer_import) {
                 const vk::AndroidHardwareBufferPropertiesANDROID hardware_props = device.getAndroidHardwareBufferPropertiesANDROID(*buffer);
 
-                uint32_t mapped_memory_type = find_suitable_mapped_type(hardware_props.memoryTypeBits);
+                const int mapped_memory_type = find_suitable_mapped_type(hardware_props.memoryTypeBits);
+                if (mapped_memory_type < 0) {
+                    report_no_coherent("AHardwareBuffer");
+                    _AHardwareBuffer_unlock(buffer, nullptr);
+                    _AHardwareBuffer_release(buffer);
+                    return map_memory_page_table_fallback(mem, address, size);
+                }
                 vk::StructureChain<vk::MemoryAllocateInfo, vk::ImportAndroidHardwareBufferInfoANDROID, vk::MemoryAllocateFlagsInfo> alloc_info{
                     vk::MemoryAllocateInfo{
                         .allocationSize = hardware_props.allocationSize,
-                        .memoryTypeIndex = mapped_memory_type },
+                        .memoryTypeIndex = static_cast<uint32_t>(mapped_memory_type) },
                     vk::ImportAndroidHardwareBufferInfoANDROID{
                         .buffer = buffer },
                     vk::MemoryAllocateFlagsInfo{
@@ -1622,11 +1643,17 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
 
                 int fd = handle->data[0];
                 const vk::MemoryFdPropertiesKHR fd_props = device.getMemoryFdPropertiesKHR(vk::ExternalMemoryHandleTypeFlagBits::eOpaqueFd, fd);
-                uint32_t mapped_memory_type = find_suitable_mapped_type(fd_props.memoryTypeBits);
+                const int mapped_memory_type = find_suitable_mapped_type(fd_props.memoryTypeBits);
+                if (mapped_memory_type < 0) {
+                    report_no_coherent("dma-buf fd");
+                    _AHardwareBuffer_unlock(buffer, nullptr);
+                    _AHardwareBuffer_release(buffer);
+                    return map_memory_page_table_fallback(mem, address, size);
+                }
                 vk::StructureChain<vk::MemoryAllocateInfo, vk::ImportMemoryFdInfoKHR, vk::MemoryAllocateFlagsInfo> alloc_info{
                     vk::MemoryAllocateInfo{
                         .allocationSize = size + KiB(4),
-                        .memoryTypeIndex = mapped_memory_type },
+                        .memoryTypeIndex = static_cast<uint32_t>(mapped_memory_type) },
                     vk::ImportMemoryFdInfoKHR{
                         .handleType = vk::ExternalMemoryHandleTypeFlagBits::eOpaqueFd,
                         .fd = fd },

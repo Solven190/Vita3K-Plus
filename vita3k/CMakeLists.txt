@@ -7,6 +7,8 @@ set(VITA3K_APP_VER_MID 1)
 set(VITA3K_APP_VER_LO 0)
 # two-component display version (v1.1): the numeric LO still feeds the exe FILE_VERSION resource  // Nick - Version
 set(VITA3K_APP_VERSION "v${VITA3K_APP_VER_HI}.${VITA3K_APP_VER_MID}")
+# Release number advertised to the updater (must match "Vita3K Build: <n>" in the GitHub release body) and rise each release
+set(VITA3K_APP_NUMBER 1)
 
 execute_process(
 	COMMAND git rev-list HEAD --count
@@ -57,7 +59,7 @@ endif()
 if(GIT_HASH STREQUAL "")
 	set(VITA3K_GIT_REV "Development version")
 	set(GIT_COUNT 0)
-elseif((GIT_REPO STREQUAL "Vita3K") AND ((GIT_BRANCH STREQUAL "master") OR (GIT_BRANCH STREQUAL "HEAD")))
+elseif(((GIT_REPO STREQUAL "Vita3K") AND ((GIT_BRANCH STREQUAL "master") OR (GIT_BRANCH STREQUAL "HEAD"))) OR (GIT_REPO STREQUAL "Vita3K-Plus"))
 	set(VITA3K_GIT_REV "${GIT_HASH}")
 	set(VITA3K_OFFICIAL_UPDATE_BUILD 1)
 else()
@@ -68,7 +70,7 @@ file(WRITE ${CMAKE_BINARY_DIR}/vita3k/config/gitver.h
 	"#define APP_VER_HI ${VITA3K_APP_VER_HI}\n"
 	"#define APP_VER_MID ${VITA3K_APP_VER_MID}\n"
 	"#define APP_VER_LO ${VITA3K_APP_VER_LO}\n"
-	"#define APP_NUMBER ${GIT_COUNT}\n"
+	"#define APP_NUMBER ${VITA3K_APP_NUMBER}\n"
 )
 
 include_directories(${CMAKE_BINARY_DIR}/vita3k/config)
