@@ -57,6 +57,7 @@
 #ifdef USE_ADRENO_TOOLS
 #include <adrenotools/bcenabler.h>
 #include <adrenotools/driver.h>
+#include <cstdlib>
 #endif
 
 #include <android/hardware_buffer.h>
@@ -539,10 +540,10 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
         instance_info.setPEnabledLayerNames(instance_layers);
         instance_info.setPEnabledExtensionNames(instance_extensions);
 #ifndef __APPLE__
-        if (use_validation_layer && has_validation_features_ext) {
+        if (use_validation_layer && has_validation_features_ext && std::getenv("VITA3K_SYNC_VALIDATION")) {
             validation_features.pNext = instance_info.pNext;
             instance_info.pNext = &validation_features;
-            LOG_INFO("Synchronization validation + best-practices enabled");
+            LOG_INFO("Synchronization validation + best-practices enabled (VITA3K_SYNC_VALIDATION)");
         }
 #endif
 
@@ -814,6 +815,10 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
             support_fsr = static_cast<bool>(props.get<vk::PhysicalDeviceShaderFloat16Int8Features>().shaderFloat16);
         }
 
+        if (support_rasterized_order_access && config.disable_raster_order) {
+            LOG_INFO("Rasterization order attachment access disabled by config");
+            support_rasterized_order_access = false;
+        }
         if (support_rasterized_order_access) {
             auto props = physical_device.getFeatures2KHR<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceRasterizationOrderAttachmentAccessFeaturesEXT>();
             support_rasterized_order_access = static_cast<bool>(props.get<vk::PhysicalDeviceRasterizationOrderAttachmentAccessFeaturesEXT>().rasterizationOrderColorAttachmentAccess);
@@ -1012,6 +1017,7 @@ void VKState::late_init(const Config &cfg, const std::string_view game_id, MemSt
     this->mem = &mem;
 
     bool use_high_accuracy = cfg.current_config.high_accuracy;
+    surface_sync_clamp_rt = cfg.surface_sync_clamp_rt;
 
     // shader interlock is more accurate but slower
     if (features.support_shader_interlock && use_high_accuracy) {

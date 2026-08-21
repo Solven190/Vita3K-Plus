@@ -169,6 +169,10 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
     context.rendered_rect_y0 = INT32_MAX;
     context.rendered_rect_x1 = 0;
     context.rendered_rect_y1 = 0;
+    context.draw_rect_x0 = INT32_MAX;
+    context.draw_rect_y0 = INT32_MAX;
+    context.draw_rect_x1 = 0;
+    context.draw_rect_y1 = 0;
 
     context.render_target = rt;
     context.scene_timestamp++;
@@ -549,6 +553,8 @@ void VKContext::stop_recording(const SceGxmNotification &notif1, const SceGxmNot
         current_visibility_buffer->queries_used.assign(current_visibility_buffer->size, false);
     }
 
+    // remember which part of the colour surface this scene's draws could have touched (for write-back bounds)
+    state.surface_cache.note_scene_draw_rect(draw_rect_x0, draw_rect_y0, draw_rect_x1, draw_rect_y1);
     ColorSurfaceCacheInfo *surface_info = nullptr;
     if (state.features.enable_memory_mapping && !state.disable_surface_sync && submit)
         surface_info = state.surface_cache.perform_surface_sync();

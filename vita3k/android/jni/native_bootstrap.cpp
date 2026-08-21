@@ -31,6 +31,7 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 
+#include <cstdlib>
 #include <filesystem>
 #include <span>
 #include <vector>
@@ -89,6 +90,11 @@ bool initialize_session(const fs::path &storage_path, Root &root_paths, std::uni
         }
 
         fs::create_directories(cfg.get_vita_fs_path());
+
+        if (!cfg.tu_debug.empty()) {
+            setenv("TU_DEBUG", cfg.tu_debug.c_str(), 1);
+            LOG_INFO("TU_DEBUG set to '{}' for the Turnip driver", cfg.tu_debug);
+        }
 
         if (!app::init(*emuenv, cfg, root_paths)) {
             LOG_ERROR("Failed to initialise emulated environment.");

@@ -20,6 +20,14 @@
 #include <input/physical_key.h>
 #include <util/system.h>
 
+#ifdef __ANDROID__
+#define VITA3K_DEFAULT_MEMORY_MAPPING "native-buffer"
+#elif defined(_WIN32)
+#define VITA3K_DEFAULT_MEMORY_MAPPING "external-host"
+#else
+#define VITA3K_DEFAULT_MEMORY_MAPPING "double-buffer"
+#endif
+
 enum ModulesMode {
     AUTOMATIC,
     AUTO_MANUAL,
@@ -146,8 +154,11 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(bool, "turbo-mode", false, turbo_mode)                                                         \
     code(int, "gpu-idx", 0, gpu_idx)                                                                    \
     code(bool, "high-accuracy", true, high_accuracy)                                                   \
+    code(std::string, "tu-debug", "", tu_debug)                                                     \
+    code(bool, "disable-raster-order", false, disable_raster_order)                                \
     code(float, "resolution-multiplier", 1.0f, resolution_multiplier)                                   \
     code(bool, "disable-surface-sync", false, disable_surface_sync)                                      \
+    code(bool, "surface-sync-clamp-rt", true, surface_sync_clamp_rt)                               \
     code(std::string, "screen-filter", "Bilinear", screen_filter)                                       \
     code(bool, "v-sync", true, v_sync)                                                                  \
     code(int, "anisotropic-filtering", 1, anisotropic_filtering)                                        \
@@ -160,7 +171,7 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(bool, "import-textures", false, import_textures)                                               \
     code(bool, "export-textures", false, export_textures)                                               \
     code(bool, "export-as-png", true, export_as_png)                                                    \
-    code(std::string, "memory-mapping", "double-buffer", memory_mapping)                                \
+    code(std::string, "memory-mapping", VITA3K_DEFAULT_MEMORY_MAPPING, memory_mapping)                   \
     code(bool, "boot-apps-full-screen", false, boot_apps_full_screen)                                   \
     code(bool, "show-live-area-screen", false, show_live_area_screen)                                   \
     code(std::string, "audio-backend", "SDL", audio_backend)                                            \

@@ -75,7 +75,7 @@ struct Config {
         float resolution_multiplier = 1.0f;
         bool disable_surface_sync = false;
         std::string screen_filter = "Bilinear";
-        std::string memory_mapping = "double-buffer";
+        std::string memory_mapping = VITA3K_DEFAULT_MEMORY_MAPPING;
         bool v_sync = true;
         int anisotropic_filtering = 1;
         bool async_pipeline_compilation = false;

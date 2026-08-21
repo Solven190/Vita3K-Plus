@@ -19,7 +19,7 @@ class EmulatorConfig {
     @JvmField var resolutionMultiplier: Float = 1.0f
     @JvmField var disableSurfaceSync: Boolean = false
     @JvmField var screenFilter: String = "Bilinear"
-    @JvmField var memoryMapping: String = "double-buffer"
+    @JvmField var memoryMapping: String = "native-buffer"
     @JvmField var vSync: Boolean = true
     @JvmField var anisotropicFiltering: Int = 1
     @JvmField var asyncPipelineCompilation: Boolean = false

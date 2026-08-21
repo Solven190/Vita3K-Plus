@@ -483,6 +483,28 @@ bool VKSurfaceCache::try_upload_guest_content(ColorSurfaceCacheInfo &info, MemSt
     return true;
 }
 
+void VKSurfaceCache::note_scene_draw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
+    if (!last_written_surface || x1 <= x0 || y1 <= y0)
+        return;
+    ColorSurfaceCacheInfo &info = *last_written_surface;
+    // scaled -> unscaled, rounded outward to the 32px tile the hardware writes back as a whole
+    const float inv = 1.0f / state.res_multiplier;
+    int32_t ux0 = static_cast<int32_t>(std::floor(x0 * inv / 32.0f)) * 32;
+    int32_t uy0 = static_cast<int32_t>(std::floor(y0 * inv / 32.0f)) * 32;
+    int32_t ux1 = static_cast<int32_t>(std::ceil(x1 * inv / 32.0f)) * 32;
+    int32_t uy1 = static_cast<int32_t>(std::ceil(y1 * inv / 32.0f)) * 32;
+    ux0 = std::clamp<int32_t>(ux0, 0, info.original_width);
+    uy0 = std::clamp<int32_t>(uy0, 0, info.original_height);
+    ux1 = std::clamp<int32_t>(ux1, 0, info.original_width);
+    uy1 = std::clamp<int32_t>(uy1, 0, info.original_height);
+    if (ux1 <= ux0 || uy1 <= uy0)
+        return;
+    info.written_x0 = std::min(info.written_x0, ux0);
+    info.written_y0 = std::min(info.written_y0, uy0);
+    info.written_x1 = std::max(info.written_x1, ux1);
+    info.written_y1 = std::max(info.written_y1, uy1);
+}
+
 SurfaceRetrieveResult VKSurfaceCache::retrieve_color_surface_for_framebuffer(MemState &mem, SceGxmColorSurface *color) {
     // Create the key to access the cache struct
     const uint32_t address = color->data.address();
@@ -561,6 +583,12 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_color_surface_for_framebuffer(Mem
             color_surface_queue.set_as_lru(&info);
         } else {
             color_surface_queue.set_as_mru(&info);
+            if (context->render_target) {
+                const uint32_t rt_w = static_cast<uint32_t>(std::lround(context->render_target->width / state.res_multiplier));
+                const uint32_t rt_h = static_cast<uint32_t>(std::lround(context->render_target->height / state.res_multiplier));
+                info.rendered_w = static_cast<uint16_t>(std::max<uint32_t>(info.rendered_w, std::min<uint32_t>(info.original_width, rt_w)));
+                info.rendered_h = static_cast<uint16_t>(std::max<uint32_t>(info.rendered_h, std::min<uint32_t>(info.original_height, rt_h)));
+            }
 
             if (info.data && *info.dirty) {
                 try_upload_guest_content(info, mem);
@@ -611,6 +639,18 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_color_surface_for_framebuffer(Mem
     color_surface_queue.set_as_mru(&info_added);
     info_added.last_frame_rendered = context->frame_timestamp;
     info_added.last_scene_rendered = context->scene_timestamp;
+    info_added.rendered_w = 0;
+    info_added.rendered_h = 0;
+    info_added.written_x0 = INT32_MAX;
+    info_added.written_y0 = INT32_MAX;
+    info_added.written_x1 = 0;
+    info_added.written_y1 = 0;
+    if (context->render_target) {
+        const uint32_t rt_w = static_cast<uint32_t>(std::lround(context->render_target->width / state.res_multiplier));
+        const uint32_t rt_h = static_cast<uint32_t>(std::lround(context->render_target->height / state.res_multiplier));
+        info_added.rendered_w = static_cast<uint16_t>(std::min<uint32_t>(original_width, rt_w));
+        info_added.rendered_h = static_cast<uint16_t>(std::min<uint32_t>(original_height, rt_h));
+    }
 
     color_address_lookup[address] = &info_added;
 
@@ -2060,6 +2100,49 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
         }
     }
 
+    bool rt_clamped = false;
+    if (state.surface_sync_clamp_rt && !sync_from_raw && !needs_copy_buffer
+        && last_written_surface->rendered_w > 0 && last_written_surface->rendered_h > 0
+        && (last_written_surface->rendered_w < last_written_surface->original_width || last_written_surface->rendered_h < last_written_surface->original_height)) {
+        const int32_t lim_x1 = static_cast<int32_t>(last_written_surface->rendered_w);
+        const int32_t lim_y1 = static_cast<int32_t>(last_written_surface->rendered_h);
+        const int32_t cur_x1 = sync_x0 + static_cast<int32_t>(sync_w);
+        const int32_t cur_y1 = sync_y0 + static_cast<int32_t>(sync_h);
+        const int32_t new_x1 = std::min(cur_x1, lim_x1);
+        const int32_t new_y1 = std::min(cur_y1, lim_y1);
+        if (new_x1 < cur_x1 || new_y1 < cur_y1) {
+            sync_w = static_cast<uint32_t>(std::max(0, new_x1 - sync_x0));
+            sync_h = static_cast<uint32_t>(std::max(0, new_y1 - sync_y0));
+            clamp_sync = true;
+            rt_clamped = true;
+        }
+    }
+    bool skip_writeback = false;
+    if (state.surface_sync_clamp_rt && !sync_from_raw && !needs_copy_buffer) {
+        const ColorSurfaceCacheInfo &ws = *last_written_surface;
+        if (ws.written_x1 <= ws.written_x0 || ws.written_y1 <= ws.written_y0) {
+            // nothing was ever drawn into it: the GPU changed no memory, there is nothing to write back
+            skip_writeback = true;
+        } else {
+            const int32_t cur_x0 = sync_x0, cur_y0 = sync_y0;
+            const int32_t cur_x1 = sync_x0 + static_cast<int32_t>(sync_w), cur_y1 = sync_y0 + static_cast<int32_t>(sync_h);
+            const int32_t nx0 = std::max(cur_x0, ws.written_x0), ny0 = std::max(cur_y0, ws.written_y0);
+            const int32_t nx1 = std::min(cur_x1, ws.written_x1), ny1 = std::min(cur_y1, ws.written_y1);
+            if (nx1 <= nx0 || ny1 <= ny0) {
+                skip_writeback = true;
+            } else if (nx0 != cur_x0 || ny0 != cur_y0 || nx1 != cur_x1 || ny1 != cur_y1) {
+                sync_x0 = nx0;
+                sync_y0 = ny0;
+                sync_w = static_cast<uint32_t>(nx1 - nx0);
+                sync_h = static_cast<uint32_t>(ny1 - ny0);
+                clamp_sync = true;
+                rt_clamped = true;
+            }
+        }
+    }
+    if (skip_writeback || sync_w == 0 || sync_h == 0)
+        return nullptr;
+
     if (state.res_multiplier != 1.0f) {
         // scale back the image using a blit command first
 
@@ -2093,10 +2176,17 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
         int32_t dst_x1 = last_written_surface->original_width, dst_y1 = last_written_surface->original_height;
 
         if (clamp_sync) {
-            src_x0 = context->rendered_rect_x0;
-            src_y0 = context->rendered_rect_y0;
-            src_x1 = context->rendered_rect_x1;
-            src_y1 = context->rendered_rect_y1;
+            if (rt_clamped) {
+                src_x0 = static_cast<int32_t>(sync_x0 * state.res_multiplier);
+                src_y0 = static_cast<int32_t>(sync_y0 * state.res_multiplier);
+                src_x1 = static_cast<int32_t>((sync_x0 + static_cast<int32_t>(sync_w)) * state.res_multiplier);
+                src_y1 = static_cast<int32_t>((sync_y0 + static_cast<int32_t>(sync_h)) * state.res_multiplier);
+            } else {
+                src_x0 = context->rendered_rect_x0;
+                src_y0 = context->rendered_rect_y0;
+                src_x1 = context->rendered_rect_x1;
+                src_y1 = context->rendered_rect_y1;
+            }
             dst_x0 = sync_x0;
             dst_y0 = sync_y0;
             dst_x1 = sync_x0 + static_cast<int32_t>(sync_w);

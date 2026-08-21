@@ -17,6 +17,9 @@
 
 #include <renderer/vulkan/functions.h>
 
+#include <algorithm>
+#include <cmath>
+
 #include <gxm/functions.h>
 #include <renderer/functions.h>
 #include <renderer/vulkan/gxm_to_vulkan.h>
@@ -344,6 +347,23 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
         const uint16_t vert_texture_count = context.record.vertex_program.get(mem)->renderer_data->texture_count;
         const uint16_t frag_texture_count = context.record.fragment_program.get(mem)->renderer_data->texture_count;
         context.state.surface_cache.perform_pending_casts(context, vert_texture_count, frag_texture_count);
+    }
+    {
+        // scissor x viewport bounds what this draw can rasterize
+        const int32_t sx0 = context.scissor.offset.x, sy0 = context.scissor.offset.y;
+        const int32_t sx1 = sx0 + static_cast<int32_t>(context.scissor.extent.width), sy1 = sy0 + static_cast<int32_t>(context.scissor.extent.height);
+        const int32_t vx0 = static_cast<int32_t>(std::floor(std::min(context.viewport.x, context.viewport.x + context.viewport.width)));
+        const int32_t vy0 = static_cast<int32_t>(std::floor(std::min(context.viewport.y, context.viewport.y + context.viewport.height)));
+        const int32_t vx1 = static_cast<int32_t>(std::ceil(std::max(context.viewport.x, context.viewport.x + context.viewport.width)));
+        const int32_t vy1 = static_cast<int32_t>(std::ceil(std::max(context.viewport.y, context.viewport.y + context.viewport.height)));
+        const int32_t x0 = std::max(sx0, vx0), y0 = std::max(sy0, vy0);
+        const int32_t x1 = std::min(sx1, vx1), y1 = std::min(sy1, vy1);
+        if (x1 > x0 && y1 > y0) {
+            context.draw_rect_x0 = std::min(context.draw_rect_x0, x0);
+            context.draw_rect_y0 = std::min(context.draw_rect_y0, y0);
+            context.draw_rect_x1 = std::max(context.draw_rect_x1, x1);
+            context.draw_rect_y1 = std::max(context.draw_rect_y1, y1);
+        }
     }
     context.scene_has_drawn = true;
 

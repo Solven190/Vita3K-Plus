@@ -79,6 +79,10 @@ struct SpirvShaderParameters {
 
     // Uniform buffer map contains layout info of a UBO inside the big SSBO.
     // only used if memory mapping is not enabled
+
+    // number of primary-attribute (pa) registers populated by the shader input setup
+    std::uint32_t frag_input_pa_regs = 0;
+
     std::map<std::uint32_t, SpirvUniformBufferInfo> buffers;
 
     // when not using buffer device address, contains the storage buffer type

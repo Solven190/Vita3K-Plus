@@ -338,6 +338,12 @@ struct VKContext : public renderer::Context {
     int32_t rendered_rect_x1 = 0;
     int32_t rendered_rect_y1 = 0;
 
+    // union of scissor x viewport of every draw in the scene (scaled coords): the only region the GPU can have written
+    int32_t draw_rect_x0 = INT32_MAX;
+    int32_t draw_rect_y0 = INT32_MAX;
+    int32_t draw_rect_x1 = 0;
+    int32_t draw_rect_y1 = 0;
+
     // used if necessary to restart easily the render pass
     vk::RenderPassBeginInfo curr_renderpass_info;
     // only useful if shader interlock is enabled, to know if we need to transition
