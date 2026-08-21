@@ -768,13 +768,27 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
         support_unix_fd_import &= SDL_GetAndroidSDKVersion() >= 26;
 #endif
 
+        bool has_cached_host_memory = false;
+        for (uint32_t i = 0; i < physical_device_memory.memoryTypeCount; i++) {
+            const vk::MemoryPropertyFlags f = physical_device_memory.memoryTypes[i].propertyFlags;
+            const bool visible = static_cast<bool>(f & vk::MemoryPropertyFlagBits::eHostVisible);
+            const bool coherent = static_cast<bool>(f & vk::MemoryPropertyFlagBits::eHostCoherent);
+            const bool cached = static_cast<bool>(f & vk::MemoryPropertyFlagBits::eHostCached);
+            LOG_INFO("memory type {}: heap {} visible={} coherent={} cached={} device_local={}", i, physical_device_memory.memoryTypes[i].heapIndex, visible, coherent, cached, static_cast<bool>(f & vk::MemoryPropertyFlagBits::eDeviceLocal));
+            if (visible && coherent && cached)
+                has_cached_host_memory = true;
+        }
+        if (!has_cached_host_memory)
+            LOG_WARN("No host-cached memory type: guest atomics would fault (SIGBUS) on remapped memory, so only Double Buffer mapping is offered");
+
         // Find which memory mapping methods are supported by the GPU
         supported_mapping_methods_mask = (1 << static_cast<int>(MappingMethod::Disabled));
         if (support_memory_mapping) {
             // No additional check needed for these methods
             mapping_method = MappingMethod::DoubleBuffer;
             supported_mapping_methods_mask |= (1 << static_cast<int>(MappingMethod::DoubleBuffer));
-            supported_mapping_methods_mask |= (1 << static_cast<int>(MappingMethod::PageTable));
+            if (has_cached_host_memory)
+                supported_mapping_methods_mask |= (1 << static_cast<int>(MappingMethod::PageTable));
 
             if (support_external_memory) {
                 // disable this extension on GPUs with an alignment requirement higher than 4096 (should only
@@ -787,7 +801,7 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
                 supported_mapping_methods_mask |= (1 << static_cast<int>(MappingMethod::ExernalHost));
 
 #ifdef __ANDROID__
-            if (support_android_buffer_import || support_unix_fd_import)
+            if ((support_android_buffer_import || support_unix_fd_import) && has_cached_host_memory)
                 supported_mapping_methods_mask |= (1 << static_cast<int>(MappingMethod::NativeBuffer));
 #endif
         }
@@ -1474,6 +1488,7 @@ uint32_t VKState::get_features_mask() {
             bool support_texture_barrier : 1;
             bool support_unknown_format : 1;
             bool use_clip_distance : 1;
+            bool force_full_precision : 1;
         };
         uint32_t value;
     } features_mask;
@@ -1491,6 +1506,7 @@ uint32_t VKState::get_features_mask() {
     features_mask.support_texture_barrier = features.support_texture_barrier;
     features_mask.support_unknown_format = features.support_unknown_format;
     features_mask.use_clip_distance = features.support_clip_distance;
+    features_mask.force_full_precision = features.force_full_precision;
 
     return features_mask.value;
 }
@@ -1566,13 +1582,7 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
             LOG_ERROR("Imported memory reports no compatible memory types");
             return -1;
         }
-        // first try to find a memory that is both coherent and cached
-        int mapped_memory_type = find_mem_type_with_flag(vk::MemoryPropertyFlagBits::eHostCoherent | vk::MemoryPropertyFlagBits::eHostCached, hardware_types);
-        if (mapped_memory_type == -1)
-            // then only coherent (lower performance)
-            mapped_memory_type = find_mem_type_with_flag(vk::MemoryPropertyFlagBits::eHostCoherent, hardware_types);
-
-        return mapped_memory_type;
+        return find_mem_type_with_flag(vk::MemoryPropertyFlagBits::eHostCoherent | vk::MemoryPropertyFlagBits::eHostCached, hardware_types);
     };
 
     // counted, not one-shot: this fires per mapping and the count is what tells us it is systemic
@@ -1580,7 +1590,7 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
         static std::atomic<uint32_t> no_coherent_count{ 0 };
         const uint32_t n = no_coherent_count.fetch_add(1, std::memory_order_relaxed) + 1;
         if (n <= 3 || (n % 100) == 0)
-            LOG_WARN("No host-coherent memory type for {} import ({} so far): using page-table mapping for this range instead", kind, n);
+            LOG_WARN("No host-coherent+cached memory type for {} import ({} so far): using page-table mapping for this range instead", kind, n);
     };
 
     switch (mapping_method) {
@@ -1711,11 +1721,11 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
         // add 4 KiB because we can as an easy way to prevent crashes due to memory accesses right after the memory boundary
         // also make sure later the mapped address is 4K aligned
         vkutil::Buffer buffer(size + KiB(4));
+        // HostCached is required, not preferred
         constexpr vma::AllocationCreateInfo memory_mapped_alloc = {
             .flags = vma::AllocationCreateFlagBits::eMapped | vma::AllocationCreateFlagBits::eHostAccessRandom,
             .usage = vma::MemoryUsage::eAutoPreferHost,
-            .requiredFlags = vk::MemoryPropertyFlagBits::eHostCoherent,
-            .preferredFlags = vk::MemoryPropertyFlagBits::eHostCached,
+            .requiredFlags = vk::MemoryPropertyFlagBits::eHostCoherent | vk::MemoryPropertyFlagBits::eHostCached,
         };
         buffer.init_buffer(mapped_memory_flags, memory_mapped_alloc);
         {
