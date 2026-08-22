@@ -71,6 +71,14 @@ struct ThreadState {
 
     uint32_t last_import_nid = 0;
     uint32_t last_import_lr = 0;
+    const char *wait_prim_kind = nullptr;
+    SceUID wait_prim_uid = 0;
+    uint32_t wait_extra = 0;
+    void set_wait_reason(const char *kind, SceUID uid, uint32_t extra) {
+        wait_prim_kind = kind;
+        wait_prim_uid = uid;
+        wait_extra = extra;
+    }
     Address entry_point;
 
     Block stack;

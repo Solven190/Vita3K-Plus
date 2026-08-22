@@ -375,6 +375,8 @@ struct VKRenderTarget : public renderer::RenderTarget {
     vk::Device device;
     uint16_t width;
     uint16_t height;
+    uint16_t base_width;
+    uint16_t base_height;
     vkutil::Image color;
     vkutil::Image depthstencil;
 

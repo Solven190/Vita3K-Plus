@@ -200,6 +200,8 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
     }
     context.current_color_format = vk_format;
 
+    rt->width = rt->base_width;
+    rt->height = rt->base_height;
     if (rt->multisample_mode && !context.record.color_surface.downscale) {
         // using MSAA without downscaling, emulate this as best as we can by multiplying the width and height of the render target by 2
         rt->width *= 2;

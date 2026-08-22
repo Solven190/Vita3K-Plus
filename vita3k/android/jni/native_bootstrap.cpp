@@ -91,6 +91,13 @@ bool initialize_session(const fs::path &storage_path, Root &root_paths, std::uni
 
         fs::create_directories(cfg.get_vita_fs_path());
 
+#ifdef NDEBUG
+        const char *build_kind = "release/optimized (NDEBUG)";
+#else
+        const char *build_kind = "debug/unoptimized";
+#endif
+        LOG_INFO("BUILD IDENTITY: {} | compiled {} {} (this TU)", build_kind, __DATE__, __TIME__);
+
         if (!cfg.tu_debug.empty()) {
             setenv("TU_DEBUG", cfg.tu_debug.c_str(), 1);
             LOG_INFO("TU_DEBUG set to '{}' for the Turnip driver", cfg.tu_debug);
@@ -160,6 +167,12 @@ extern "C" {
 JNIEXPORT jboolean JNICALL
 Java_org_vita3k_emulator_NativeLib_prepareFrontend(JNIEnv *, jclass) {
     return prepare_frontend_runtime() ? JNI_TRUE : JNI_FALSE;
+}
+JNIEXPORT void JNICALL
+Java_org_vita3k_emulator_NativeLib_onTrimMemory(JNIEnv *, jclass, jint level) {
+    // Android is warning it may reclaim memory and/or kill us
+    LOG_WARN("[ANDROID MEMORY] onTrimMemory level={} - OS under memory pressure, an OOM kill may follow", static_cast<int>(level));
+    logging::flush();
 }
 
 JNIEXPORT jboolean JNICALL

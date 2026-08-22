@@ -51,7 +51,7 @@ static std::mutex s_log_callback_mutex;
 static void register_log_exception_handler();
 static void rebuild_default_logger();
 
-static void flush() {
+void flush() {
     spdlog::details::registry::instance().flush_all();
 }
 
@@ -98,6 +98,7 @@ ExitCode init(const Root &root_paths, bool use_stdout) {
 
     if (add_sink(root_paths.get_log_path() / LOG_FILE_NAME) != Success)
         return InitConfigFailed;
+    LOG_INFO("================= Vita3K session start =================");
 
     spdlog::set_error_handler([](const std::string &msg) {
         std::cerr << "spdlog error: " << msg << std::endl;
@@ -144,7 +145,12 @@ void set_level(spdlog::level::level_enum log_level) {
 
 ExitCode add_sink(const fs::path &log_path) {
     try {
-        sinks.push_back(std::make_shared<spdlog::sinks::basic_file_sink_mt>(log_path.generic_path().native(), true));
+        // One log file that appends across launches so the start of a session (GPU/driver init, etc is never lost by a relaunch
+        constexpr uintmax_t LOG_SIZE_CAP = 30ull * 1024 * 1024;
+        bool truncate = true;
+        if (fs::exists(log_path))
+            truncate = fs::file_size(log_path) > LOG_SIZE_CAP; // append while under the cap
+        sinks.push_back(std::make_shared<spdlog::sinks::basic_file_sink_mt>(log_path.generic_path().native(), truncate));
     } catch (const spdlog::spdlog_ex &ex) {
         std::cerr << "File log initialization failed: " << ex.what() << std::endl;
         return InitConfigFailed;

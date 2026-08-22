@@ -543,6 +543,16 @@ private fun GpuSettingsSection(
                     ),
                     onShowHelp = onShowHelp
                 )
+                SettingsToggleRow(
+                    title = stringResource(R.string.settings_gpu_accurate_scheduling),
+                    checked = cfg.accurateThreadScheduling,
+                    onCheckedChange = { onUpdate { accurateThreadScheduling = it } },
+                    help = SettingsHelpEntry(
+                        title = stringResource(R.string.settings_gpu_accurate_scheduling),
+                        body = stringResource(R.string.settings_gpu_accurate_scheduling_desc)
+                    ),
+                    onShowHelp = onShowHelp
+                )
                 val hasSupportedMemoryMapping = supportedMemoryMappingMask > 1
                 val memoryMappingTitle = stringResource(R.string.settings_gpu_memory_mapping)
                 val memoryMappingHelp = helpEntry(memoryMappingTitle, stringResource(R.string.settings_gpu_memory_mapping_desc))

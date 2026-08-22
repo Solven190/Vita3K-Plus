@@ -284,7 +284,8 @@ void KernelState::log_thread_hang_dump() {
         if (status == ThreadStatus::run) {
             line = fmt::format("thread {} ({}) status=run (executing or blocked inside an HLE import) last_import_nid=0x{:08X} import_lr=0x{:X}", t->name, t->id, t->last_import_nid, t->last_import_lr);
         } else {
-            line = fmt::format("thread {} ({}) status={} PC=0x{:X} LR=0x{:X} last_import_nid=0x{:08X} import_lr=0x{:X} stack:\n{}", t->name, t->id, status_str, read_pc(*t->cpu), read_lr(*t->cpu), t->last_import_nid, t->last_import_lr, t->log_stack_traceback());
+            line = fmt::format("thread {} ({}) status={} PC=0x{:X} LR=0x{:X} last_import_nid=0x{:08X} import_lr=0x{:X} stack:\n{}", t->name, t->id, status_str, read_pc(*t->cpu), read_lr(*t->cpu), t->last_import_nid, t->last_import_lr, t->log_stack_traceback())
+                + fmt::format(" waiting_on={}#{} extra=0x{:X}", t->wait_prim_kind ? t->wait_prim_kind : "?", t->wait_prim_uid, t->wait_extra);
         }
         LOG_ERROR("HANG DUMP: {}", line);
         dump += line + "\n";

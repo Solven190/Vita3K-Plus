@@ -32,10 +32,12 @@
 #endif
 #include <display/functions.h>
 
+#include <config/state.h>
 #include <dialog/state.h>
 #include <display/state.h>
 #include <emuenv/state.h>
 #include <kernel/state.h>
+#include <kernel/sync_primitives.h>
 #include <renderer/state.h>
 
 #include <chrono>
@@ -155,17 +157,43 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
                 }
             }
         }
-        // Hang watchdog: no framebuffer flip for ~10s (600 vblanks) while unpaused -> dump guest threads once per stall.
-        {
-            static uint64_t last_dumped_setframe = ~0ull;
-            const uint64_t setframe = emuenv.display.last_setframe_vblank_count.load();
-            const uint64_t vblanks = emuenv.display.vblank_count.load();
-            if (setframe > 0 && vblanks > setframe && (vblanks - setframe) > 600
-                && !emuenv.kernel.is_threads_paused() && last_dumped_setframe != setframe) {
-                last_dumped_setframe = setframe; // one dump per distinct stall
-                LOG_ERROR("HANG WATCHDOG: no framebuffer flip for {} vblanks — dumping guest threads", vblanks - setframe);
+        // Periodic thread dump for diagnosing partial hangs
+        if (emuenv.cfg.hang_dump_seconds > 0) {
+            static uint64_t next_forced_dump_vblank = 0;
+            const uint64_t vblanks_now = emuenv.display.vblank_count.load();
+            const uint64_t period = static_cast<uint64_t>(emuenv.cfg.hang_dump_seconds) * 60;
+            if (period > 0 && vblanks_now >= next_forced_dump_vblank && !emuenv.kernel.is_threads_paused()) {
+                next_forced_dump_vblank = vblanks_now + period;
+                LOG_ERROR("PERIODIC THREAD DUMP (hang-dump-seconds={}) — vblank {}", emuenv.cfg.hang_dump_seconds, vblanks_now);
                 emuenv.kernel.log_thread_hang_dump();
             }
+        }
+
+        // Hang watchdog - if there's no framebuffer flip for ~10s (600 vblanks) while unpaused then dump guest threads
+        {
+            static uint64_t last_dumped_setframe = ~0ull;
+            static uint64_t last_break_vblanks = 0;
+            const uint64_t setframe = emuenv.display.last_setframe_vblank_count.load();
+            const uint64_t vblanks = emuenv.display.vblank_count.load();
+            const bool unpaused = !emuenv.kernel.is_threads_paused();
+            const uint64_t stall_vblanks = (setframe > 0 && vblanks > setframe) ? (vblanks - setframe) : 0;
+            // Full 10s dump for diagnostics (once per distinct stall).
+            if (stall_vblanks > 600 && unpaused && last_dumped_setframe != setframe) {
+                last_dumped_setframe = setframe; // one dump per distinct stall
+                LOG_ERROR("HANG WATCHDOG: no framebuffer flip for {} vblanks — dumping guest threads", stall_vblanks);
+                emuenv.kernel.log_thread_hang_dump();
+            }
+            // Deadlock breaker for stuck event flags (runs after 3s)
+            constexpr uint64_t BREAK_STALL_VBLANKS = 180; // ~3s at 60Hz
+            if (stall_vblanks > BREAK_STALL_VBLANKS && unpaused
+                && (last_break_vblanks == 0 || vblanks - last_break_vblanks > BREAK_STALL_VBLANKS)) {
+                last_break_vblanks = vblanks;
+                const int nudged = emuenv.kernel.try_break_frame_sync_deadlock();
+                if (nudged > 0)
+                    LOG_ERROR("HANG WATCHDOG: deadlock breaker nudged {} stuck event flag(s) after {} vblanks stalled", nudged, stall_vblanks);
+            }
+            if (stall_vblanks == 0)
+                last_break_vblanks = 0;
         }
 
         const auto time_ms = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();

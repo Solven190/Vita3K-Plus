@@ -723,8 +723,11 @@ static void signal_handler(int sig, siginfo_t *info, void *uct) noexcept {
         }
     }
 
-    LOG_CRITICAL("Unhandled access to 0x{:X}", reinterpret_cast<uintptr_t>(info->si_addr));
-    raise(SIGTRAP);
+    // Genuine crash so record it in our log and flush as users can rarely logcat
+    LOG_CRITICAL("[CRASH] fatal signal {} (si_code {}) at address 0x{:X} - flushing log and aborting", sig, info->si_code, reinterpret_cast<uintptr_t>(info->si_addr));
+    logging::flush();
+    signal(sig, SIG_DFL);
+    raise(sig);
     return;
 }
 
@@ -737,13 +740,12 @@ static void register_access_violation_handler(const AccessViolationHandler &hand
     if (sigaction(SIGSEGV, &sa, NULL) == -1) {
         LOG_CRITICAL("Failed to register an exception handler");
     }
-#ifdef __APPLE__
-    // When accessing memory region which is PROT_NONE on macOS, it is raising SIGBUS not SIGSEGV.
-    // So apply same signal handler to SIGBUS
+    // SIGBUS: on macOS a PROT_NONE access raises it instead of SIGSEGV.
+    // on Android an ARM64 atomic against non-cacheable memory raises it.
+    // Handle it on both so it is logged and not silent.
     if (sigaction(SIGBUS, &sa, NULL) == -1) {
         LOG_CRITICAL("Failed to register an exception handler to SIGBUS");
     }
-#endif
 }
 
 #endif

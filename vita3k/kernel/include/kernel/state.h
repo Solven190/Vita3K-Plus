@@ -184,6 +184,8 @@ struct KernelState {
     void resume_world();
 
     void log_thread_hang_dump();
+    // Last resort recovery for a full deadlock (called by the hang watchdog)
+    int try_break_frame_sync_deadlock();
 
     // Kill all guest threads and block until they have exited. Must only be called from a host thread.
     void process_exit();

@@ -211,6 +211,7 @@ SceInt32 simple_event_waitorpoll(KernelState &kernel, const char *export_name, S
 
         return SCE_KERNEL_OK;
     } else if (is_wait) {
+        thread->set_wait_reason("event", event_id, wait_pattern);
         std::unique_lock<std::mutex> thread_lock(thread->mutex);
         thread->update_status(ThreadStatus::wait, ThreadStatus::run);
 
@@ -655,6 +656,7 @@ inline static int mutex_lock_impl(KernelState &kernel, MemState &mem, const char
 
     const ThreadStatePtr thread = kernel.get_thread(thread_id);
 
+    thread->set_wait_reason("mutex", mutex->uid, mutex->owner ? mutex->owner->id : 0);
     std::unique_lock<std::mutex> mutex_lock(mutex->mutex);
 
     bool is_recursive = (mutex->attr & SCE_KERNEL_MUTEX_ATTR_RECURSIVE);
@@ -1095,6 +1097,7 @@ SceInt32 semaphore_wait(KernelState &kernel, const char *export_name, SceUID thr
 
     const ThreadStatePtr thread = kernel.get_thread(thread_id);
 
+    thread->set_wait_reason("sema", semaId, needCount);
     std::unique_lock<std::mutex> semaphore_lock(semaphore->mutex);
 
     if (semaphore->val < needCount) {
@@ -1291,6 +1294,7 @@ int condvar_wait(KernelState &kernel, MemState &mem, const char *export_name, Sc
 
     const ThreadStatePtr thread = kernel.get_thread(thread_id);
 
+    thread->set_wait_reason("cond", condvar->uid, condvar->associated_mutex ? condvar->associated_mutex->uid : 0);
     std::unique_lock<std::mutex> condition_variable_lock(condvar->mutex);
 
     if (auto error = mutex_unlock_impl(kernel, mem, export_name, thread_id, 1, condvar->associated_mutex))
@@ -1501,6 +1505,7 @@ static int eventflag_waitorpoll(KernelState &kernel, const char *export_name, Sc
 
         return SCE_KERNEL_OK;
     } else if (dowait) {
+        thread->set_wait_reason("evf", event->uid, flags);
         std::unique_lock<std::mutex> thread_lock(thread->mutex);
         thread->update_status(ThreadStatus::wait, ThreadStatus::run);
 
@@ -1538,6 +1543,42 @@ SceInt32 eventflag_wait(KernelState &kernel, const char *export_name, SceUID thr
 
 int eventflag_poll(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID event_id, unsigned int flags, unsigned int wait, unsigned int *outBits) {
     return eventflag_waitorpoll(kernel, export_name, thread_id, event_id, flags, wait, outBits, 0, false);
+}
+
+int KernelState::try_break_frame_sync_deadlock() {
+    std::vector<std::pair<SceUID, SceUInt32>> nudges;
+    {
+        const std::lock_guard<std::mutex> lock(mutex);
+        for (auto &[uid, event] : eventflags) {
+            const std::lock_guard<std::mutex> ev_lock(event->mutex);
+            if (!event->waiting_threads || event->waiting_threads->size() == 0)
+                continue;
+            bool any_satisfiable = false;
+            SceUInt32 need = 0;
+            int best_prio = 0x7fffffff;
+            for (auto it = event->waiting_threads->begin(); it != event->waiting_threads->end(); ++it) {
+                const auto &w = *it;
+                const bool cond = (w.wait & SCE_EVENT_WAITOR)
+                    ? ((static_cast<SceUInt32>(event->flags) & static_cast<SceUInt32>(w.flags)) != 0)
+                    : ((static_cast<SceUInt32>(event->flags) & static_cast<SceUInt32>(w.flags)) == static_cast<SceUInt32>(w.flags));
+                if (cond) {
+                    any_satisfiable = true;
+                    break;
+                }
+                if (w.priority < best_prio) {
+                    best_prio = w.priority;
+                    need = static_cast<SceUInt32>(w.flags);
+                }
+            }
+            if (!any_satisfiable && need != 0)
+                nudges.emplace_back(uid, need);
+        }
+    }
+    for (const auto &[uid, bits] : nudges) {
+        LOG_ERROR("DEADLOCK BREAKER: event flag {} has blocked waiter(s) with no satisfiable condition; setting bits {:#x} to break a frame-sync deadlock", uid, bits);
+        eventflag_set(*this, "deadlock_breaker", 0, uid, bits);
+    }
+    return static_cast<int>(nudges.size());
 }
 
 SceInt32 eventflag_set(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID evfId, SceUInt32 bitPattern) {

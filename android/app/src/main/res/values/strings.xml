@@ -388,6 +388,8 @@
     <string name="settings_gpu_disable_surface_sync_desc">Speed hack, disabling turns off surface syncing between CPU and GPU.\nSurface syncing is needed by a few games.\nGives a big performance boost if disabled (in particular when upscaling is on).</string>
     <string name="settings_gpu_async_pipeline">Asynchronous Pipeline Compilation</string>
     <string name="settings_gpu_async_pipeline_desc">Allow pipelines to be compiled concurrently on multiple concurrent threads.\nThis decreases pipeline compilation stutter at the cost of temporary graphical glitches.</string>
+    <string name="settings_gpu_accurate_scheduling">Accurate Thread Scheduling</string>
+    <string name="settings_gpu_accurate_scheduling_desc">Run guest threads one at a time in priority order, closer to real hardware.\nFixes hangs/deadlocks in some games (e.g. cutscene freezes) at a possible performance cost.</string>
     <string name="settings_gpu_screen_filter">Screen Filter</string>
     <string name="settings_gpu_screen_filter_desc">Select the final image filter to apply.</string>
     <string name="settings_gpu_resolution">Internal Resolution Upscaling</string>

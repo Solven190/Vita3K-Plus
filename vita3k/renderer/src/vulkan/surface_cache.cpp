@@ -305,6 +305,12 @@ void VKSurfaceCache::destroy_surface(DepthStencilSurfaceCacheInfo &info) {
 
     destroy_framebuffers(info.texture.view);
     destroy_queue.add_image(info.texture);
+
+    if (info.sample_rate_copy) {
+        destroy_framebuffers(info.sample_rate_copy->view);
+        destroy_queue.add_image(*info.sample_rate_copy);
+        info.sample_rate_copy.reset();
+    }
 }
 
 VKSurfaceCache::VKSurfaceCache(VKState &state)
@@ -1409,16 +1415,73 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_depth_stencil_for_framebuffer(Sce
         // this the most recently used depth-stencil surface
         ds_surface_queue.set_as_mru(cached_info);
 
-        bool need_remake = cached_info->texture.width < width
+        const bool need_remake = cached_info->texture.width < width
             || cached_info->texture.height < height
             || cached_info->stride_samples != depth_stencil->get_stride()
             || cached_info->tiling != tiling;
 
-        if (!need_remake)
+        if (!need_remake) {
+            // MSAA passes rasterise at the sample rate, so a pass whose colour surface downscales
+            // draws through a viewport half the size of the pass that filled the shared depth/stencil
+            constexpr bool disable_ds_resample = true;
+
+            VKContext *ctx = reinterpret_cast<VKContext *>(state.context);
+            uint32_t sx = 1, sy = 1;
+            if (!disable_ds_resample
+                && target->multisample_mode != SCE_GXM_MULTISAMPLE_NONE && ctx && ctx->record.color_surface.downscale
+                && !depth_stencil->force_store) {
+                sy = 2;
+                if (target->multisample_mode == SCE_GXM_MULTISAMPLE_4X)
+                    sx = 2;
+            }
+            vkutil::Image &full = cached_info->texture;
+            const uint32_t src_w = width * sx;
+            const uint32_t src_h = height * sy;
+            const vk::FormatFeatureFlags blit_feats = vk::FormatFeatureFlagBits::eBlitSrc | vk::FormatFeatureFlagBits::eBlitDst;
+            if ((sx > 1 || sy > 1) && full.image && full.width >= src_w && full.height >= src_h
+                && (state.physical_device.getFormatProperties(full.format).optimalTilingFeatures & blit_feats) == blit_feats) {
+                if (!cached_info->sample_rate_copy || cached_info->sample_rate_copy->width != width || cached_info->sample_rate_copy->height != height) {
+                    if (cached_info->sample_rate_copy) {
+                        destroy_framebuffers(cached_info->sample_rate_copy->view);
+                        state.frame().destroy_queue.add_image(*cached_info->sample_rate_copy);
+                        cached_info->sample_rate_copy.reset();
+                    }
+                    cached_info->sample_rate_copy = std::make_unique<vkutil::Image>(width, height, full.format);
+                    cached_info->sample_rate_copy->init_image(vk::ImageUsageFlagBits::eDepthStencilAttachment | vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eSampled);
+                }
+                vkutil::Image &resampled = *cached_info->sample_rate_copy;
+                vk::CommandBuffer cmd_buffer = reinterpret_cast<VKContext *>(state.context)->prerender_cmd;
+                full.transition_to(cmd_buffer, vkutil::ImageLayout::TransferSrc, vkutil::ds_subresource_range);
+                resampled.transition_to_discard(cmd_buffer, vkutil::ImageLayout::TransferDst, vkutil::ds_subresource_range);
+                const std::array<vk::Offset3D, 2> src_bounds{ vk::Offset3D{ 0, 0, 0 }, vk::Offset3D{ static_cast<int32_t>(src_w), static_cast<int32_t>(src_h), 1 } };
+                const std::array<vk::Offset3D, 2> dst_bounds{ vk::Offset3D{ 0, 0, 0 }, vk::Offset3D{ static_cast<int32_t>(width), static_cast<int32_t>(height), 1 } };
+                const auto region_for = [&](vk::ImageAspectFlagBits aspect) {
+                    const vk::ImageSubresourceLayers layers{ aspect, 0, 0, 1 };
+                    return vk::ImageBlit{
+                        .srcSubresource = layers,
+                        .srcOffsets = src_bounds,
+                        .dstSubresource = layers,
+                        .dstOffsets = dst_bounds
+                    };
+                };
+                const std::array<vk::ImageBlit, 2> blit_regions{
+                    region_for(vk::ImageAspectFlagBits::eDepth),
+                    region_for(vk::ImageAspectFlagBits::eStencil)
+                };
+                cmd_buffer.blitImage(full.image, vk::ImageLayout::eTransferSrcOptimal, resampled.image, vk::ImageLayout::eTransferDstOptimal, blit_regions, vk::Filter::eNearest);
+                full.transition_to(cmd_buffer, vkutil::ImageLayout::DepthStencilReadOnly, vkutil::ds_subresource_range);
+                resampled.transition_to(cmd_buffer, vkutil::ImageLayout::DepthStencilReadOnly, vkutil::ds_subresource_range);
+                LOG_INFO_ONCE("Depth/stencil resampled to the MSAA sample rate for a downscaling pass: "
+                              "{}x{} region of {}x{} -> {}x{}",
+                    src_w, src_h, full.width, full.height, width, height);
+                return { resampled.view, &resampled };
+            }
+
             return {
                 cached_info->texture.view,
                 &cached_info->texture
             };
+        }
     } else {
         // retrieve a new depth stencil
         cached_info = ds_surface_queue.get_lru();

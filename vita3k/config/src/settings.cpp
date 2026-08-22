@@ -147,6 +147,7 @@ std::vector<RestartRequiredSetting> get_restart_required_settings(
     append_if_changed(before.memory_mapping != after.memory_mapping, RestartRequiredSetting::MemoryMapping);
     append_if_changed(before.audio_backend != after.audio_backend, RestartRequiredSetting::AudioBackend);
     append_if_changed(before.validation_layer != after.validation_layer, RestartRequiredSetting::ValidationLayer);
+    append_if_changed(before.accurate_thread_scheduling != after.accurate_thread_scheduling, RestartRequiredSetting::AccurateThreadScheduling);
 
     return changed;
 }

@@ -195,6 +195,9 @@ struct DepthStencilSurfaceCacheInfo : public SurfaceCacheInfo {
 
     // used when texture viewport is not enabled
     std::vector<DepthSurfaceView> read_surfaces;
+
+    // Resampled view of this surface for a pass that rasterises at a lower rate than the pass which filled it
+    std::unique_ptr<vkutil::Image> sample_rate_copy;
 };
 
 // result when looking in the surface cache for a texture
