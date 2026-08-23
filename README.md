@@ -14,6 +14,7 @@ https://github.com/nckstwrt/Vita3K-Plus/releases
 - **Resistance** - Rendering issues fixed on Android
 - **Little Big Planet** - "Vignette" shading and background images fixed
 - **Ys: Memories of Celcetta** Graphics Fixed
+- **Ragnarok Odyssey ACE** Graphics Fixed
 - **ModNation: Racers Road Trip** - Regression Fixed
 - Defaults now to External Host for Windows and Native Buffer on Android. **Use these Memory Mapping options for the best compatibility**
 
