@@ -2312,6 +2312,20 @@ void convert_gxp_to_glsl_from_filepath(const std::string &shader_filepath_utf8) 
     std::fill_n(hints.fragment_textures, SCE_GXM_MAX_TEXTURE_UNITS, SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR);
 
     convert_gxp(*reinterpret_cast<SceGxmProgram *>(gxp_program.data()), shader_filepath_str.filename().string(), features, shader::Target::GLSLOpenGL, hints, false, true);
+
+    const GeneratedShader vk_shader = convert_gxp(*reinterpret_cast<SceGxmProgram *>(gxp_program.data()), shader_filepath_str.filename().string(), features, shader::Target::SpirVVulkan, hints, false, false);
+    if (!vk_shader.spirv.empty()) {
+        fs::path spv_path = shader_filepath_str;
+        spv_path.replace_extension(".vk.spv");
+        fs::ofstream spv_file(spv_path, std::ios::binary);
+        if (spv_file) {
+            spv_file.write(reinterpret_cast<const char *>(vk_shader.spirv.data()), static_cast<std::streamsize>(vk_shader.spirv.size() * sizeof(uint32_t)));
+            spv_file.close();
+            LOG_INFO("Wrote Vulkan SPIR-V to {} ({} words) - check it with: spirv-val --target-env vulkan1.1 <file>", spv_path.string(), vk_shader.spirv.size());
+        } else {
+            LOG_ERROR("Could not write {}", spv_path.string());
+        }
+    }
 }
 
 } // namespace shader

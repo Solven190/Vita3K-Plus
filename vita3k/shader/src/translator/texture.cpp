@@ -279,7 +279,9 @@ spv::Id shader::usse::USSETranslatorVisitor::do_fetch_texture(const spv::Id tex,
         spv::Id zero_f = m_b.makeFloatConstant(0.0f);
         spv::Id rebuilt = m_b.createCompositeConstruct(type_f32_v[4], { word(0, 1), word(2, 3), zero_f, zero_f });
 
-        image_sample = m_b.createTriOp(spv::OpSelect, type_f32_v[4], unit_is_raw, rebuilt, image_sample);
+        const spv::Id type_bool_v4 = m_b.makeVectorType(type_bool, 4);
+        const spv::Id unit_is_raw_v4 = m_b.createCompositeConstruct(type_bool_v4, { unit_is_raw, unit_is_raw, unit_is_raw, unit_is_raw });
+        image_sample = m_b.createTriOp(spv::OpSelect, type_f32_v[4], unit_is_raw_v4, rebuilt, image_sample);
     }
 
     if (get_data_type_size(dest_type) < 4 && dest_type != DataType::UINT16 && dest_type != DataType::INT16)

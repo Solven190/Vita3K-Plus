@@ -34,6 +34,7 @@
 #include <Windows.h>
 #else
 #include <csignal>
+#include <dlfcn.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #endif
@@ -754,8 +755,43 @@ static void signal_handler(int sig, siginfo_t *info, void *uct) noexcept {
         }
     }
 
-    // Genuine crash so record it in our log and flush as users can rarely logcat
-    LOG_CRITICAL("[CRASH] fatal signal {} (si_code {}) at address 0x{:X} - flushing log and aborting", sig, info->si_code, reinterpret_cast<uintptr_t>(info->si_addr));
+    // Genuine crash so record it in our log and flush as users can rarely logcat.
+    uintptr_t crash_pc = 0;
+#if defined(__aarch64__)
+#if defined(__APPLE__)
+    crash_pc = static_cast<uintptr_t>(context->uc_mcontext->__ss.__pc);
+#else
+    crash_pc = static_cast<uintptr_t>(context->uc_mcontext.pc);
+#endif
+#elif defined(__x86_64__)
+#if defined(__APPLE__)
+    crash_pc = static_cast<uintptr_t>(context->uc_mcontext->__ss.__rip);
+#else
+    crash_pc = static_cast<uintptr_t>(context->uc_mcontext.gregs[REG_RIP]);
+#endif
+#endif
+
+    uintptr_t crash_lr = 0;
+#if defined(__aarch64__) && !defined(__APPLE__)
+    crash_lr = static_cast<uintptr_t>(context->uc_mcontext.regs[30]);
+#elif defined(__aarch64__)
+    crash_lr = static_cast<uintptr_t>(context->uc_mcontext->__ss.__lr);
+#endif
+
+    auto describe = [](uintptr_t addr) -> std::string {
+        if (addr == 0)
+            return "null";
+        Dl_info info{};
+        if (dladdr(reinterpret_cast<void *>(addr), &info) == 0 || info.dli_fname == nullptr)
+            return fmt::format("0x{:X} (unmapped)", addr);
+        const uintptr_t off = addr - reinterpret_cast<uintptr_t>(info.dli_fbase);
+        if (info.dli_sname != nullptr)
+            return fmt::format("0x{:X} = {}+0x{:X} ({})", addr, info.dli_fname, off, info.dli_sname);
+        return fmt::format("0x{:X} = {}+0x{:X}", addr, info.dli_fname, off);
+    };
+
+    LOG_CRITICAL("[CRASH] fatal signal {} (si_code {}) at address 0x{:X} - pc {} - lr {} - flushing log and aborting",
+        sig, info->si_code, reinterpret_cast<uintptr_t>(info->si_addr), describe(crash_pc), describe(crash_lr));
     logging::flush();
     signal(sig, SIG_DFL);
     raise(sig);
