@@ -848,6 +848,19 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
 
     const bool is_typeless_cast = bytes_per_pixel_requested != bytes_per_pixel_in_store;
 
+    // A same-size cast to a different format is a reinterpretation - the game wants the store's bytes.
+    // Those bytes cannot survive a float image: any 32-bit word whose exponent field is 0xFF is a NaN and
+    // the sampler canonicalises it. For a 64-bit F16 store we therefore hand the shader the bytes in a
+    // R16G16B16A16_UNORM image (no NaN encodings, and k/65535 round-trips exactly through float32) and let
+    // do_fetch_texture rebuild the words. See [raw cast] in shader/src/translator/texture.cpp.
+    const bool store_is_f16_format = info.format == SCE_GXM_COLOR_BASE_FORMAT_F16
+        || info.format == SCE_GXM_COLOR_BASE_FORMAT_F16F16
+        || info.format == SCE_GXM_COLOR_BASE_FORMAT_F16F16F16F16;
+    constexpr bool carry_raw_cast_in_unorm = true;
+    const bool raw_bits_cast = carry_raw_cast_in_unorm && !is_typeless_cast
+        && bytes_per_pixel_in_store == 8 && store_is_f16_format
+        && vk_format != info.texture.format;
+
     // TODO: this is true only for linear textures (and also kind of for tiled textures) (and in this case start_x = 0),
     // for swizzled textures this is different
     const uint32_t data_delta = address - ite->first;
@@ -953,7 +966,8 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
                         vkutil::ImageLayout::SampledImage,
                         use_alt_view ? (base_is_srgb ? vk::Format::eR8G8B8A8Unorm : vk::Format::eR8G8B8A8Srgb) : casted->texture.format,
                         is_typeless_cast && !info.has_phase_view,
-                        cast_phase_hi
+                        cast_phase_hi,
+                        raw_bits_cast
                     };
                 }
 
@@ -1012,6 +1026,12 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
 
             casted->texture.format = (bytes_per_pixel_requested != bytes_per_pixel_in_store && store_is_f16(info.format)) ? force_unsigned_reinterpret_format(vk_format) : vk_format;
 
+            if (raw_bits_cast) {
+                // carry the bytes in a NaN-free format; the shader rebuilds the words after sampling
+                casted->texture.format = vk::Format::eR16G16B16A16Unorm;
+                LOG_INFO_ONCE("Raw-bit cast of a 64-bit F16 store: carrying the bytes through a UNORM image");
+            }
+
             const bool casted_is_rgba8 = casted->texture.format == vk::Format::eR8G8B8A8Srgb
                 || casted->texture.format == vk::Format::eR8G8B8A8Unorm;
             if (casted_is_rgba8)
@@ -1029,6 +1049,15 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
                 resulting_swizzle = vkutil::color_to_texture_swizzle(info.swizzle, swizzle);
             else
                 resulting_swizzle = swizzle;
+
+            if (raw_bits_cast) {
+                // The carrier holds the store's four 16-bit halves, not colour channels. The guest
+                // texture's swizzle describes the REINTERPRETED result (an R32G32 texture asks for
+                // b = 0, a = 1), so applying it to the carrier destroys halves 2 and 3 - which is how
+                // word1 came back as 0xFFFF0000 and painted a flat blue over Ragnarok Odyssey ACE.
+                // The halves must arrive untouched; do_fetch_texture rebuilds the words from them.
+                resulting_swizzle = vk::ComponentMapping{};
+            }
 
             if (use_compute_deinterleave) {
                 // The compute pass writes this image through an R32_UINT storage view (created lazily at dispatch)
@@ -1088,6 +1117,28 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
                     .dstSubresource = vkutil::color_subresource_layer,
                     .dstOffsets = std::array<vk::Offset3D, 2>{ vk::Offset3D{ 0, 0, 0 }, vk::Offset3D{ dst_w, dst_h, 1 } }
                 };
+                // A cast to a DIFFERENT format of the same texel size is a reinterpretation: the game wants
+                // the bytes, not the values. vkCmdBlitImage converts between formats, so it silently
+                // rewrites them. Ragnarok Odyssey ACE renders packed integers (its shaders read them back
+                // with unpack2xU16 / unpack4xU8) into what we allocate as R16G16B16A16_FLOAT and then reads
+                // the surface through an R32G32_FLOAT view.
+                //
+                // The bytes must also come from the right image. An F16 store cannot hold every bit pattern
+                // through the float attachment - NaN payloads get canonicalised and out-of-range values
+                // clamp - which is exactly why `raw_image`, the parallel R16G16B16A16_UINT attachment the
+                // fragment shaders write alongside it, exists. The two typeless paths below already prefer
+                // it on the same condition (`raw_image && !content_is_blended`; blending can only be done
+                // on the float attachment, so a blended surface has no trustworthy raw copy).
+                constexpr bool preserve_bits_on_equal_size_cast = true;
+                const bool is_reinterpretation = info.texture.format != casted->texture.format;
+                const bool size_compatible = vk::blockSize(info.texture.format) == vk::blockSize(casted->texture.format);
+                const bool extents_match = (src_w == dst_w) && (src_h == dst_h);
+                const bool bit_copy = preserve_bits_on_equal_size_cast && is_reinterpretation && size_compatible && extents_match;
+
+                const bool cast_use_raw = bit_copy && info.raw_image && !info.content_is_blended
+                    && vk::blockSize(info.raw_image->format) == vk::blockSize(casted->texture.format);
+                const vk::Image cast_src_image = cast_use_raw ? info.raw_image->image : info.texture.image;
+
                 vk::ImageMemoryBarrier src_barrier{
                     .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite | vk::AccessFlagBits::eShaderWrite,
                     .dstAccessMask = vk::AccessFlagBits::eTransferRead,
@@ -1095,11 +1146,33 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
                     .newLayout = vk::ImageLayout::eGeneral,
                     .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                     .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                    .image = info.texture.image,
+                    .image = cast_src_image,
                     .subresourceRange = vkutil::color_subresource_range
                 };
                 cmd_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eFragmentShader, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, src_barrier);
-                cmd_buffer.blitImage(info.texture.image, vk::ImageLayout::eGeneral, casted->texture.image, vk::ImageLayout::eTransferDstOptimal, blit, vk::Filter::eLinear);
+
+                if (bit_copy) {
+                    const vk::ImageCopy copy{
+                        .srcSubresource = vkutil::color_subresource_layer,
+                        .srcOffset = vk::Offset3D{ static_cast<int32_t>(start_x), static_cast<int32_t>(start_sourced_line), 0 },
+                        .dstSubresource = vkutil::color_subresource_layer,
+                        .dstOffset = vk::Offset3D{ 0, 0, 0 },
+                        .extent = vk::Extent3D{ static_cast<uint32_t>(src_w), static_cast<uint32_t>(src_h), 1 }
+                    };
+                    cmd_buffer.copyImage(cast_src_image, vk::ImageLayout::eGeneral, casted->texture.image, vk::ImageLayout::eTransferDstOptimal, copy);
+                    LOG_INFO_ONCE("Reinterpreting a surface as a different format of the same size: copying the "
+                                  "raw bytes from the {} image (raw_image={}, content_is_blended={})",
+                        cast_use_raw ? "RAW" : "float", static_cast<bool>(info.raw_image), info.content_is_blended);
+                } else {
+                    // Filtering between texels of packed data blends unrelated bit patterns, so a cast that
+                    // has to rescale at least picks whole texels.
+                    const vk::Filter filter = is_reinterpretation ? vk::Filter::eNearest : vk::Filter::eLinear;
+                    if (is_reinterpretation)
+                        LOG_WARN_ONCE("Reinterpreting a surface as a different format while rescaling it "
+                                      "({}x{} -> {}x{}); the bytes cannot be preserved through the resize",
+                            src_w, src_h, dst_w, dst_h);
+                    cmd_buffer.blitImage(info.texture.image, vk::ImageLayout::eGeneral, casted->texture.image, vk::ImageLayout::eTransferDstOptimal, blit, filter);
+                }
             } else {
                 LOG_INFO_ONCE("Game is doing typeless copies");
 
@@ -1253,7 +1326,8 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
             vkutil::ImageLayout::SampledImage,
             use_alt_view ? (base_is_srgb ? vk::Format::eR8G8B8A8Unorm : vk::Format::eR8G8B8A8Srgb) : casted->texture.format,
             is_typeless_cast && !info.has_phase_view,
-            cast_phase_hi
+            cast_phase_hi,
+            raw_bits_cast
         };
     } else {
         // the renderpass external dependencies should take care of the barrier
@@ -1429,7 +1503,7 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_depth_stencil_for_framebuffer(Sce
         if (!need_remake) {
             // MSAA passes rasterise at the sample rate, so a pass whose colour surface downscales
             // draws through a viewport half the size of the pass that filled the shared depth/stencil
-            constexpr bool disable_ds_resample = true;
+            constexpr bool disable_ds_resample = false;
 
             VKContext *ctx = reinterpret_cast<VKContext *>(state.context);
             uint32_t sx = 1, sy = 1;

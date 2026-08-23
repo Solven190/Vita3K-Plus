@@ -253,6 +253,35 @@ spv::Id shader::usse::USSETranslatorVisitor::do_fetch_texture(const spv::Id tex,
 
     image_sample = m_b.createOp(op, type_f32_v[4], params);
 
+    if (m_spirv_params.frag_coord_id != spv::NoResult && m_spirv_params.render_info_id != spv::NoResult
+        && texture_index >= 0 && texture_index < 16) {
+        const spv::Id type_u32 = m_b.makeUintType(32);
+        const spv::Id type_u32_v4 = m_b.makeVectorType(type_u32, 4);
+        const spv::Id type_bool = m_b.makeBoolType();
+
+        spv::Id mask_ptr = utils::create_access_chain(m_b, spv::StorageClassUniform, m_spirv_params.render_info_id, { m_b.makeIntConstant(FRAG_UNIFORM_raw_cast_mask) });
+        spv::Id mask_u = m_b.createUnaryOp(spv::OpConvertFToU, type_u32, m_b.createLoad(mask_ptr, spv::NoPrecision));
+        spv::Id bit = m_b.createBinOp(spv::OpShiftRightLogical, type_u32, mask_u, m_b.makeUintConstant(texture_index));
+        bit = m_b.createBinOp(spv::OpBitwiseAnd, type_u32, bit, m_b.makeUintConstant(1));
+        spv::Id unit_is_raw = m_b.createBinOp(spv::OpINotEqual, type_bool, bit, m_b.makeUintConstant(0));
+
+        spv::Id scaled = m_b.createBinOp(spv::OpVectorTimesScalar, type_f32_v[4], image_sample, m_b.makeFloatConstant(65535.0f));
+        spv::Id rounded = m_b.createBuiltinCall(type_f32_v[4], std_builtins, GLSLstd450Round, { scaled });
+        spv::Id halves = m_b.createUnaryOp(spv::OpConvertFToU, type_u32_v4, rounded);
+
+        auto word = [&](int lo, int hi) {
+            spv::Id l = m_b.createCompositeExtract(halves, type_u32, lo);
+            spv::Id h = m_b.createCompositeExtract(halves, type_u32, hi);
+            h = m_b.createBinOp(spv::OpShiftLeftLogical, type_u32, h, m_b.makeUintConstant(16));
+            spv::Id w = m_b.createBinOp(spv::OpBitwiseOr, type_u32, l, h);
+            return m_b.createUnaryOp(spv::OpBitcast, type_f32, w);
+        };
+        spv::Id zero_f = m_b.makeFloatConstant(0.0f);
+        spv::Id rebuilt = m_b.createCompositeConstruct(type_f32_v[4], { word(0, 1), word(2, 3), zero_f, zero_f });
+
+        image_sample = m_b.createTriOp(spv::OpSelect, type_f32_v[4], unit_is_raw, rebuilt, image_sample);
+    }
+
     if (get_data_type_size(dest_type) < 4 && dest_type != DataType::UINT16 && dest_type != DataType::INT16)
         m_b.setPrecision(image_sample, spv::DecorationRelaxedPrecision);
 

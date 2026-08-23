@@ -207,6 +207,7 @@ struct TextureLookupResult {
     vk::Format format;
     bool is_typeless_cast = false;
     bool cast_phase_hi = false;
+    bool is_raw_bits = false;
 };
 
 // result when trying to retrieve a surface from the surface cache

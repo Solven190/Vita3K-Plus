@@ -172,8 +172,10 @@ void sync_texture(VKContext &context, MemState &mem, std::size_t index, SceGxmTe
         }
     }
 
-    if (!is_vertex)
+    if (!is_vertex) {
         context.curr_frag_ublock.set_cast_sampler_bit(index, lookup_result->is_typeless_cast, lookup_result->cast_phase_hi);
+        context.curr_frag_ublock.set_raw_cast_bit(index, lookup_result->is_raw_bits);
+    }
 }
 
 void VKTextureCache::prepare_staging_buffer(bool is_configure) {

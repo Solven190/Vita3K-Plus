@@ -516,6 +516,7 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     // Cast-sampler UV re-anchor inputs
     frag_ublock.cast_sampler_mask = static_cast<float>(context.curr_frag_ublock.cast_sampler_bits);
     frag_ublock.cast_phase_mask = static_cast<float>(context.curr_frag_ublock.cast_phase_bits);
+    frag_ublock.raw_cast_mask = static_cast<float>(context.curr_frag_ublock.raw_cast_bits);
     frag_ublock.inv_frag_width = 1.0f / static_cast<float>(context.render_target->width);
     frag_ublock.inv_frag_height = 1.0f / static_cast<float>(context.render_target->height);
     if (context.curr_frag_ublock.cast_sampler_bits != 0) {

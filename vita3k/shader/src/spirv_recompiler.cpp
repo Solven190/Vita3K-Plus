@@ -1195,7 +1195,7 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
     }
 
     if (program_type == SceGxmProgramType::Fragment) {
-        std::vector<spv::Id> uniform_composition = { f32, f32, f32, f32, f32, f32, f32, f32, f32 };
+        std::vector<spv::Id> uniform_composition = { f32, f32, f32, f32, f32, f32, f32, f32, f32, f32 };
         if (uniform_buffer_count > 0)
             uniform_composition.push_back(buffer_addresses_type);
         if (uniform_texture_count > 0) {
@@ -1223,6 +1223,7 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
         ADD_FRAG_UNIFORM_MEMBER(cast_phase_mask);
         ADD_FRAG_UNIFORM_MEMBER(inv_frag_width);
         ADD_FRAG_UNIFORM_MEMBER(inv_frag_height);
+        ADD_FRAG_UNIFORM_MEMBER(raw_cast_mask);
 
 #undef ADD_FRAG_UNIFORM_MEMBER
         // the resolution multiplier does not require a high precision
