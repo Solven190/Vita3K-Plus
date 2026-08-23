@@ -202,10 +202,51 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
 
     rt->width = rt->base_width;
     rt->height = rt->base_height;
+    bool msaa_expanded = false;
     if (rt->multisample_mode && !context.record.color_surface.downscale) {
         // using MSAA without downscaling, emulate this as best as we can by multiplying the width and height of the render target by 2
         rt->width *= 2;
         rt->height *= 2;
+        msaa_expanded = true;
+    }
+
+    constexpr bool apply_color_surface_downscale = true;
+    context.surface_downscale = 1.0f;
+    if (apply_color_surface_downscale && color_surface_fin != nullptr
+        && context.record.color_surface.downscale && !msaa_expanded
+        && color_surface_fin->width > 0 && color_surface_fin->height > 0) {
+        const float res_multiplier = context.state.res_multiplier;
+        const uint32_t color_width_scaled = static_cast<uint32_t>(color_surface_fin->width * res_multiplier);
+        const uint32_t color_height_scaled = static_cast<uint32_t>(color_surface_fin->height * res_multiplier);
+        if (color_width_scaled > 0 && color_height_scaled > 0
+            && rt->base_width >= color_width_scaled * 2
+            && rt->base_height >= color_height_scaled * 2) {
+            context.surface_downscale = 0.5f;
+            rt->width /= 2;
+            rt->height /= 2;
+            LOG_INFO_ONCE("Colour surface downscale: rendering a {}x{} target at the surface's {}x{} scale "
+                          "(guest {}x{}, res_multiplier {})",
+                rt->base_width, rt->base_height, color_width_scaled, color_height_scaled,
+                color_surface_fin->width, color_surface_fin->height, res_multiplier);
+        }
+    }
+
+    constexpr bool log_gxm_scene_state = false; // ~600 lines/sec - only for guest-state investigations
+    context.gxmscene_viewport_logged = false;
+    if constexpr (log_gxm_scene_state) {
+        const SceGxmColorSurface &cs = context.record.color_surface;
+        const SceGxmDepthStencilSurface &ds = context.record.depth_stencil_surface;
+        LOG_INFO("[GXMSCENE] rt base={}x{} msaa={} -> extent={}x{} expanded={} | color addr=0x{:08X} "
+                 "{}x{} stride={} downscale={} gamma={} disabled={} fmt=0x{:08X} type={} | "
+                 "ds depth=0x{:08X} stencil=0x{:08X} force_load={} force_store={} | res_mult={}",
+            rt->base_width, rt->base_height, static_cast<int>(rt->multisample_mode),
+            rt->width, rt->height, msaa_expanded,
+            cs.data.address(), cs.width, cs.height, cs.strideInPixels,
+            static_cast<uint32_t>(cs.downscale), static_cast<uint32_t>(cs.gamma),
+            static_cast<uint32_t>(cs.disabled), static_cast<uint32_t>(cs.colorFormat),
+            static_cast<int>(cs.surfaceType),
+            ds.depth_data.address(), ds.stencil_data.address(),
+            ds.force_load, ds.force_store, context.state.res_multiplier);
     }
 
     SceGxmDepthStencilSurface *ds_surface_fin = &context.record.depth_stencil_surface;

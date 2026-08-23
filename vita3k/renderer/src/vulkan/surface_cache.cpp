@@ -1057,7 +1057,7 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
 
         auto record_cast = [this, info_ptr, casted_index, casted_is_new, use_compute_deinterleave,
                                bytes_per_pixel_requested, bytes_per_pixel_in_store, width, height,
-                               original_width, original_height, start_x, start_sourced_line, data_delta, stride_bytes](vk::CommandBuffer cmd_buffer) {
+                               start_x, start_sourced_line, data_delta, stride_bytes](vk::CommandBuffer cmd_buffer) {
             ColorSurfaceCacheInfo &info = *info_ptr;
             CastedTexture *casted = &info.casted_textures[casted_index];
             if (casted_is_new)
@@ -1068,11 +1068,17 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
             if (bytes_per_pixel_requested == bytes_per_pixel_in_store) {
                 const int32_t src_w = static_cast<int32_t>(std::min<uint32_t>(width, info.width - start_x));
                 const int32_t src_h = static_cast<int32_t>(std::min<uint32_t>(height, info.height - start_sourced_line));
-                const uint32_t surface_stride_px = bytes_per_pixel_in_store ? (stride_bytes / bytes_per_pixel_in_store) : 0;
-                const bool uniform_scale = std::abs(static_cast<int64_t>(width) * info.height - static_cast<int64_t>(height) * info.width) <= static_cast<int64_t>(width) * info.height / 16;
-                const bool is_subrect_alias = original_width == surface_stride_px && !uniform_scale;
-                const int32_t dst_w = is_subrect_alias ? static_cast<int32_t>(casted->texture.width * static_cast<uint32_t>(src_w) / width) : static_cast<int32_t>(casted->texture.width);
-                const int32_t dst_h = is_subrect_alias ? static_cast<int32_t>(casted->texture.height * static_cast<uint32_t>(src_h) / height) : static_cast<int32_t>(casted->texture.height);
+                constexpr bool clamp_casted_dst_to_source = true;
+                const int32_t dst_w = clamp_casted_dst_to_source
+                    ? std::max<int32_t>(1, static_cast<int32_t>(casted->texture.width * static_cast<uint32_t>(src_w) / width))
+                    : static_cast<int32_t>(casted->texture.width);
+                const int32_t dst_h = clamp_casted_dst_to_source
+                    ? std::max<int32_t>(1, static_cast<int32_t>(casted->texture.height * static_cast<uint32_t>(src_h) / height))
+                    : static_cast<int32_t>(casted->texture.height);
+                if (dst_w != static_cast<int32_t>(casted->texture.width) || dst_h != static_cast<int32_t>(casted->texture.height))
+                    LOG_INFO_ONCE("Casted texture sourced from a smaller surface: {}x{} of a requested {}x{} "
+                                  "written to the first {}x{} of a {}x{} image",
+                        src_w, src_h, width, height, dst_w, dst_h, casted->texture.width, casted->texture.height);
 
                 vk::ImageBlit blit{
                     .srcSubresource = vkutil::color_subresource_layer,

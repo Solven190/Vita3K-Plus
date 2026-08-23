@@ -248,6 +248,8 @@ struct VKContext : public renderer::Context {
 
     bool scene_wrote_depth = false;
     bool scene_has_drawn = false;
+    bool gxmscene_viewport_logged = false;
+    float surface_downscale = 1.0f;
     bool scene_macroblock_flushed = false;
 
     uint32_t current_fb_width = 0;

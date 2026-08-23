@@ -135,6 +135,7 @@ struct NonDependentTextureQueryCallInfo {
 
     DataType component_type;
     uint8_t component_count;
+    uint8_t store_component_count = 0; // How many components the query actually writes
 };
 
 using NonDependentTextureQueryCallInfos = std::vector<NonDependentTextureQueryCallInfo>;
