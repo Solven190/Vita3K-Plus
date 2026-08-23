@@ -58,6 +58,8 @@ struct TextureCacheEntry {
 struct VKTextureCache : public TextureCache {
     VKState &state;
 
+    uint64_t release_all_cached_textures();
+
     TextureStagingBuffer staging_buffers[NB_TEXTURE_STAGING_BUFFERS];
     uint32_t staging_idx = 0;
     uint64_t last_waited_scene = 0;

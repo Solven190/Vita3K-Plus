@@ -173,6 +173,21 @@ Java_org_vita3k_emulator_NativeLib_onTrimMemory(JNIEnv *, jclass, jint level) {
     // Android is warning it may reclaim memory and/or kill us
     LOG_WARN("[ANDROID MEMORY] onTrimMemory level={} - OS under memory pressure, an OOM kill may follow", static_cast<int>(level));
     logging::flush();
+
+    constexpr int trim_running_low = 10;
+    if (static_cast<int>(level) < trim_running_low)
+        return;
+
+    // Hand the request to the render thread - it owns every GPU object involved. Keep the highest
+    // level seen until it is serviced.
+    EmuEnvState *emuenv = android_session_state().emuenv.get();
+    if (!emuenv || !emuenv->renderer)
+        return;
+    std::atomic<int> &pending = emuenv->renderer->memory_trim_level;
+    int seen = pending.load(std::memory_order_relaxed);
+    while (static_cast<int>(level) > seen
+        && !pending.compare_exchange_weak(seen, static_cast<int>(level), std::memory_order_relaxed))
+        ;
 }
 
 JNIEXPORT jboolean JNICALL

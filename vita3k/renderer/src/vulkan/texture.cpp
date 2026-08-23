@@ -59,6 +59,31 @@ static bool is_depth_stencil_compatible_format(SceGxmTextureBaseFormat format, b
 VKTextureCache::VKTextureCache(VKState &state)
     : state(state) {}
 
+uint64_t VKTextureCache::release_all_cached_textures() {
+    uint64_t freed = 0;
+    for (auto &item : texture_queue.items) {
+        TextureCacheInfo &info = item.content;
+        if (info.texture_size == 0)
+            continue;
+
+        texture_lookup.erase(std::bit_cast<TextureGxmDataRepr>(info.texture));
+        info.texture_size = 0;
+        info.dirty = false;
+        info.use_hash = false;
+        info.last_hash_scene = 0;
+
+        TextureCacheEntry &entry = textures[info.index];
+        if (entry.texture.image) {
+            freed += entry.memory_needed;
+            entry.texture.destroy();
+        }
+        entry.memory_needed = 0;
+    }
+    current_texture = nullptr;
+    gxm_texture = nullptr;
+    return freed;
+}
+
 void VKTextureCache::cleanup() {
     for (auto &entry : textures) {
         if (entry.texture.image)

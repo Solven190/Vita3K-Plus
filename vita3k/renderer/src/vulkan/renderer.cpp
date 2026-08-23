@@ -1440,6 +1440,15 @@ void VKState::render_frame(DisplayState &display, const GxmState &gxm, MemState 
 void VKState::swap_window() {
     screen_renderer.swap_window();
 
+    // Android asked us to give memory back!
+    const int trim_level = memory_trim_level.exchange(-1, std::memory_order_relaxed);
+    if (trim_level >= 0) {
+        device.waitIdle();
+        const uint64_t freed = texture_cache.release_all_cached_textures();
+        LOG_WARN("[ANDROID MEMORY] trim level {}: released {} MiB of cached textures", trim_level, freed / (1024 * 1024));
+        logging::flush();
+    }
+
     // look once a frame if we need to save the pipeline cache
     const auto time_s = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 

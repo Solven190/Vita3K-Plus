@@ -253,6 +253,36 @@ static void apply_host_protect(uint8_t *target, size_t size, const MemPerm perm,
 #endif
 }
 
+static void release_external_shadow_pages(uint8_t *target, size_t size, size_t host_page_size) {
+    constexpr bool release_shadow_pages_when_mapped = true;
+    if (!release_shadow_pages_when_mapped)
+        return;
+#ifndef _WIN32
+    // Windows deliberately excluded here
+    uint8_t *inner_start = reinterpret_cast<uint8_t *>(align(reinterpret_cast<uintptr_t>(target), host_page_size));
+    uint8_t *inner_end = reinterpret_cast<uint8_t *>(align_down(reinterpret_cast<uintptr_t>(target + size), host_page_size));
+    if (inner_end <= inner_start)
+        return;
+
+    const size_t inner_size = static_cast<size_t>(inner_end - inner_start);
+    if (madvise(inner_start, inner_size, MADV_DONTNEED) == -1) {
+        LOG_WARN_ONCE("madvise(MADV_DONTNEED) failed releasing externally mapped pages: {}", get_error_msg());
+        return;
+    }
+
+    static std::atomic<uint64_t> released_total{ 0 };
+    const uint64_t before = released_total.fetch_add(inner_size, std::memory_order_relaxed);
+    const uint64_t after = before + inner_size;
+    constexpr uint64_t step = MiB(64);
+    if ((before / step) != (after / step))
+        LOG_INFO("Released {} MiB of arena pages shadowed by external mappings", after / MiB(1));
+#else
+    (void)target;
+    (void)size;
+    (void)host_page_size;
+#endif
+}
+
 void unprotect_inner(MemState &state, Address addr, uint32_t size) {
     if (LOG_PROTECT) {
         fmt::print("Unprotect: {} {}\n", log_hex(addr), size);
@@ -454,6 +484,7 @@ void add_external_mapping(MemState &mem, Address addr, uint32_t size, uint8_t *a
         mem.page_table[addr / KiB(4) + block] = page_table_entry;
 
     apply_host_protect(original_address, size, MemPerm::None, mem.host_page_size);
+    release_external_shadow_pages(original_address, size, mem.host_page_size);
 
     const std::unique_lock<std::mutex> lock(mem.protect_mutex);
     const std::lock_guard<std::mutex> ext_lock(mem.external_mapping_mutex);

@@ -137,6 +137,9 @@ struct State {
     int supported_mapping_methods_mask = 1;
     MappingMethod mapping_method = MappingMethod::Disabled;
 
+    // Android memory pressure (onTrimMemory)
+    std::atomic<int> memory_trim_level{ -1 };
+
     // used for driver bug workaround
     bool is_adreno_stock = false;
     bool is_adreno_turnip = false;
