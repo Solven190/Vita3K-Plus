@@ -25,6 +25,10 @@ object AndroidDiagnostics {
                 NativeLib.logDiagnostics(text)
         } catch (t: Throwable) {
             Log.e("Vita3K", "logStartupDiagnostics failed", t)
+            try {
+                NativeLib.logDiagnostics("startup diagnostics FAILED: $t")
+            } catch (ignored: Throwable) {
+            }
         }
     }
 

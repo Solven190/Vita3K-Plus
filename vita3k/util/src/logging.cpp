@@ -15,6 +15,7 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+#include <util/fork_build.h>
 #include <util/log.h>
 
 #ifdef _WIN32
@@ -99,6 +100,7 @@ ExitCode init(const Root &root_paths, bool use_stdout) {
     if (add_sink(root_paths.get_log_path() / LOG_FILE_NAME) != Success)
         return InitConfigFailed;
     LOG_INFO("================= Vita3K session start =================");
+    LOG_INFO("FORK BUILD seq {} compiled {} {} | {}", FORK_BUILD_SEQ, __DATE__, __TIME__, FORK_BUILD_CHANGES);
 
     spdlog::set_error_handler([](const std::string &msg) {
         std::cerr << "spdlog error: " << msg << std::endl;

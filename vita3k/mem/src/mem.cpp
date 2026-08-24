@@ -35,6 +35,7 @@
 #else
 #include <csignal>
 #include <dlfcn.h>
+#include <setjmp.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #endif
@@ -714,44 +715,114 @@ static void register_access_violation_handler(const AccessViolationHandler &hand
 
 #else
 
+static thread_local sigjmp_buf t_fault_probe_jmp;
+static thread_local volatile bool t_fault_probe_active = false;
+
+static uintptr_t extract_fault_pc(ucontext_t *context) {
+#if defined(__aarch64__)
+#if defined(__APPLE__)
+    return static_cast<uintptr_t>(context->uc_mcontext->__ss.__pc);
+#else
+    return static_cast<uintptr_t>(context->uc_mcontext.pc);
+#endif
+#elif defined(__x86_64__)
+#if defined(__APPLE__)
+    return static_cast<uintptr_t>(context->uc_mcontext->__ss.__rip);
+#else
+    return static_cast<uintptr_t>(context->uc_mcontext.gregs[REG_RIP]);
+#endif
+#else
+    (void)context;
+    return 0;
+#endif
+}
+
+static uintptr_t extract_fault_lr(ucontext_t *context) {
+#if defined(__aarch64__)
+#if defined(__APPLE__)
+    return static_cast<uintptr_t>(context->uc_mcontext->__ss.__lr);
+#else
+    return static_cast<uintptr_t>(context->uc_mcontext.regs[30]);
+#endif
+#else
+    (void)context;
+    return 0;
+#endif
+}
+
 static void signal_handler(int sig, siginfo_t *info, void *uct) noexcept {
     auto context = static_cast<ucontext_t *>(uct);
 
+    if (t_fault_probe_active)
+        siglongjmp(t_fault_probe_jmp, sig);
+
+    static thread_local int handler_depth = 0;
+    if (handler_depth >= 1) {
+        signal(sig, SIG_DFL);
+        return;
+    }
+    handler_depth++;
+    struct DepthGuard {
+        int &depth;
+        ~DepthGuard() { --depth; }
+    } depth_guard{ handler_depth };
+
+#ifdef __ANDROID__
+    if (sig == SIGBUS) {
+        const uintptr_t pc = extract_fault_pc(context);
+        const uintptr_t lr = extract_fault_lr(context);
+        const char *pc_module = "?";
+        uintptr_t pc_offset = 0;
+        Dl_info dl_pc{};
+        if (pc != 0 && dladdr(reinterpret_cast<void *>(pc), &dl_pc) != 0 && dl_pc.dli_fname != nullptr) {
+            pc_module = dl_pc.dli_fname;
+            pc_offset = pc - reinterpret_cast<uintptr_t>(dl_pc.dli_fbase);
+        }
+        LOG_CRITICAL("[SIGBUS] si_code {} at address 0x{:X} - pc 0x{:X} = {}+0x{:X} lr 0x{:X} - reported BEFORE recovery; if the log ends here, recovery re-faulted",
+            info->si_code, reinterpret_cast<uintptr_t>(info->si_addr), pc, pc_module, pc_offset, lr);
+        logging::flush();
+    }
+#endif
+
+    if (sig != SIGABRT && sig != SIGILL) {
 #ifdef __aarch64__
 #ifdef __APPLE__
-    const uint32_t esr = context->uc_mcontext->__es.__esr;
+        const uint32_t esr = context->uc_mcontext->__es.__esr;
 #else
-    _aarch64_ctx *ctx = reinterpret_cast<_aarch64_ctx *>(context->uc_mcontext.__reserved);
-    // get the ESR register
-    while (ctx->magic != ESR_MAGIC) {
-        if (ctx->magic == 0)
-            [[unlikely]]
-            raise(SIGTRAP);
-        else
-            [[likely]]
+        uint64_t esr = 0;
+        bool have_esr = false;
+        _aarch64_ctx *ctx = reinterpret_cast<_aarch64_ctx *>(context->uc_mcontext.__reserved);
+        while (ctx->magic != 0) {
+            if (ctx->magic == ESR_MAGIC) {
+                esr = reinterpret_cast<esr_context *>(ctx)->esr;
+                have_esr = true;
+                break;
+            }
             ctx = reinterpret_cast<_aarch64_ctx *>(reinterpret_cast<uint8_t *>(ctx) + ctx->size);
-    }
-
-    const uint64_t esr = reinterpret_cast<esr_context *>(ctx)->esr;
+        }
 #endif
-    // https://developer.arm.com/documentation/ddi0595/2021-03/AArch64-Registers/ESR-EL1--Exception-Syndrome-Register--EL1-
-    const uint32_t exception_class = static_cast<uint32_t>(esr) >> 26;
-    const bool is_executing = (exception_class == 0b100000) || (exception_class == 0b100001);
-    const bool is_data_abort = (exception_class == 0b100100) || (exception_class == 0b100101);
-    const bool is_writing = is_data_abort && (esr & (1 << 6));
+        // https://developer.arm.com/documentation/ddi0595/2021-03/AArch64-Registers/ESR-EL1--Exception-Syndrome-Register--EL1-
+#ifdef __APPLE__
+        constexpr bool have_esr = true;
+#endif
+        const uint32_t exception_class = have_esr ? (static_cast<uint32_t>(esr) >> 26) : 0;
+        const bool is_executing = have_esr && ((exception_class == 0b100000) || (exception_class == 0b100001));
+        const bool is_data_abort = (exception_class == 0b100100) || (exception_class == 0b100101);
+        const bool is_writing = is_data_abort && (esr & (1 << 6));
 #else
 #ifdef __APPLE__
-    const uint64_t err = context->uc_mcontext->__es.__err;
+        const uint64_t err = context->uc_mcontext->__es.__err;
 #else
-    const uint64_t err = context->uc_mcontext.gregs[REG_ERR];
+        const uint64_t err = context->uc_mcontext.gregs[REG_ERR];
 #endif
-    const bool is_executing = err & 0x10;
-    const bool is_writing = err & 0x2;
+        const bool is_executing = err & 0x10;
+        const bool is_writing = err & 0x2;
 #endif
 
-    if (!is_executing) {
-        if (access_violation_handler(reinterpret_cast<uint8_t *>(info->si_addr), is_writing)) {
-            return;
+        if (!is_executing) {
+            if (access_violation_handler(reinterpret_cast<uint8_t *>(info->si_addr), is_writing)) {
+                return;
+            }
         }
     }
 
@@ -813,6 +884,41 @@ static void register_access_violation_handler(const AccessViolationHandler &hand
     if (sigaction(SIGBUS, &sa, NULL) == -1) {
         LOG_CRITICAL("Failed to register an exception handler to SIGBUS");
     }
+    if (sigaction(SIGABRT, &sa, NULL) == -1) {
+        LOG_CRITICAL("Failed to register an exception handler to SIGABRT");
+    }
+    if (sigaction(SIGILL, &sa, NULL) == -1) {
+        LOG_CRITICAL("Failed to register an exception handler to SIGILL");
+    }
+    if (sigaction(SIGTRAP, &sa, NULL) == -1) {
+        LOG_CRITICAL("Failed to register an exception handler to SIGTRAP");
+    }
+}
+
+bool test_arm64_atomics_on(void *ptr) {
+#if defined(__ANDROID__) && defined(__aarch64__)
+    volatile uint32_t *word = static_cast<volatile uint32_t *>(ptr);
+    t_fault_probe_active = true;
+    const int faulted = sigsetjmp(t_fault_probe_jmp, 1);
+    if (faulted == 0) {
+        __atomic_fetch_add(const_cast<uint32_t *>(word), 0u, __ATOMIC_SEQ_CST);
+        uint32_t value, status;
+        asm volatile(
+            "1: ldaxr %w0, [%2]\n"
+            "   stlxr %w1, %w0, [%2]\n"
+            "   cbnz  %w1, 1b\n"
+            : "=&r"(value), "=&r"(status)
+            : "r"(word)
+            : "memory");
+    }
+    t_fault_probe_active = false;
+    if (faulted != 0)
+        LOG_ERROR("ARM64 atomic probe faulted with signal {} on mapping at {}", faulted, ptr);
+    return faulted == 0;
+#else
+    (void)ptr;
+    return true;
+#endif
 }
 
 #endif

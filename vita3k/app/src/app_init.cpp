@@ -429,6 +429,7 @@ bool init(EmuEnvState &state, Config &cfg, const Root &root_paths) {
         } else {
             LOG_CRITICAL("std::terminate called without an active exception");
         }
+        logging::flush();
         std::abort();
     });
 

@@ -15,6 +15,9 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+#include <algorithm>
+#include <array>
+#include <bit>
 #include <chrono>
 #include <cpu/functions.h>
 #include <renderer/vulkan/functions.h>
@@ -414,7 +417,7 @@ void VKTextureCache::configure_texture(const SceGxmTexture &gxm_texture) {
     uint32_t width = gxm::get_width(gxm_texture);
     uint32_t height = gxm::get_height(gxm_texture);
 
-    const uint16_t mip_count = renderer::texture::get_upload_mip(gxm_texture.true_mip_count(), width, height);
+    uint16_t mip_count = renderer::texture::get_upload_mip(gxm_texture.true_mip_count(), width, height);
 
     vk::Format vk_format = texture::translate_format(base_format);
     if (gxm::is_bcn_format(base_format) && !support_dxt)
@@ -422,6 +425,41 @@ void VKTextureCache::configure_texture(const SceGxmTexture &gxm_texture) {
         vk_format = bcn_to_rgba8(vk_format);
     if (gxm_texture.gamma_mode)
         vk_format = linear_to_srgb(vk_format);
+
+    if (vk_format != vk::Format::eUndefined && !format_supports_sampled_image(vk_format)) {
+        vk::Format fallback = texture::translate_format(base_format);
+        if (gxm::is_bcn_format(base_format) && !support_dxt)
+            fallback = bcn_to_rgba8(fallback);
+        if (fallback != vk_format && format_supports_sampled_image(fallback)) {
+            LOG_WARN_ONCE("Texture format {} is not sampleable on this GPU - using {} instead (sRGB decode dropped)", vk::to_string(vk_format), vk::to_string(fallback));
+            vk_format = fallback;
+        } else {
+            const auto raw = std::bit_cast<std::array<uint32_t, 4>>(gxm_texture);
+            LOG_ERROR("Texture format {} (base 0x{:X}) is not sampleable on this GPU and has no direct fallback - substituting RGBA8; raw words {:08X} {:08X} {:08X} {:08X}", vk::to_string(vk_format), fmt::underlying(base_format), raw[0], raw[1], raw[2], raw[3]);
+            vk_format = gxm_texture.gamma_mode ? vk::Format::eR8G8B8A8Srgb : vk::Format::eR8G8B8A8Unorm;
+        }
+    }
+
+    // Refuse to hand the gfx driver anything out of range and instead substitute safe values
+    {
+        const uint32_t max_dim = 16384; // conservative floor of maxImageDimension2D across our GPUs
+        const bool format_invalid = (vk_format == vk::Format::eUndefined);
+        const bool dims_invalid = (width == 0) || (height == 0) || (width > max_dim) || (height > max_dim);
+        const uint32_t max_mips_allowed = static_cast<uint32_t>(std::bit_width(std::max(std::max(width, 1u), std::max(height, 1u))));
+        const bool mips_invalid = (mip_count == 0) || (mip_count > max_mips_allowed);
+        if (format_invalid || dims_invalid || mips_invalid) {
+            const auto raw = std::bit_cast<std::array<uint32_t, 4>>(gxm_texture);
+            LOG_ERROR("Refusing degenerate texture image: {}x{} mips {} format {} (base 0x{:X} type 0x{:X} cube {}) raw words {:08X} {:08X} {:08X} {:08X} - substituting a safe placeholder",
+                width, height, mip_count, vk::to_string(vk_format), fmt::underlying(base_format),
+                fmt::underlying(gxm_texture.texture_type()), is_cube, raw[0], raw[1], raw[2], raw[3]);
+            if (format_invalid)
+                vk_format = vk::Format::eR8G8B8A8Unorm;
+            width = std::clamp(width, 1u, max_dim);
+            height = std::clamp(height, 1u, max_dim);
+            const uint32_t max_mips_fixed = static_cast<uint32_t>(std::bit_width(std::max(width, height)));
+            mip_count = static_cast<uint16_t>(std::clamp<uint32_t>(mip_count, 1u, max_mips_fixed));
+        }
+    }
 
     current_texture->mip_count = mip_count;
     current_texture->is_cube = is_cube;
@@ -593,6 +631,17 @@ void VKTextureCache::upload_done() {
     // this should not be necessary
     cmd_buffer = nullptr;
     is_texture_transfer_ready = false;
+}
+
+bool VKTextureCache::format_supports_sampled_image(vk::Format format) {
+    auto it = sampled_image_support_cache.find(static_cast<VkFormat>(format));
+    if (it != sampled_image_support_cache.end())
+        return it->second;
+    const vk::FormatProperties props = state.physical_device.getFormatProperties(format);
+    constexpr vk::FormatFeatureFlags needed = vk::FormatFeatureFlagBits::eSampledImage | vk::FormatFeatureFlagBits::eTransferDst;
+    const bool supported = (props.optimalTilingFeatures & needed) == needed;
+    sampled_image_support_cache[static_cast<VkFormat>(format)] = supported;
+    return supported;
 }
 
 bool VKTextureCache::format_supports_linear_filter(vk::Format format) {

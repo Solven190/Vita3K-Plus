@@ -233,11 +233,17 @@ Java_org_vita3k_emulator_NativeLib_init(JNIEnv *env, jclass, jstring storage_pat
         const jmethodID diag_method = env->GetStaticMethodID(diag_class, "logStartupDiagnostics", "()V");
         if (diag_method != nullptr)
             env->CallStaticVoidMethod(diag_class, diag_method);
+        else
+            LOG_ERROR("[ANDROID DIAG] logStartupDiagnostics method not found - exit-reason reporting is broken");
+        if (env->ExceptionCheck()) {
+            LOG_ERROR("[ANDROID DIAG] logStartupDiagnostics threw - exit-reason reporting is broken");
+            env->ExceptionClear();
+        }
+        env->DeleteLocalRef(diag_class);
+    } else {
+        LOG_ERROR("[ANDROID DIAG] AndroidDiagnostics class not found (R8-stripped? check proguard-rules.pro) - exit-reason reporting is broken");
         if (env->ExceptionCheck())
             env->ExceptionClear();
-        env->DeleteLocalRef(diag_class);
-    } else if (env->ExceptionCheck()) {
-        env->ExceptionClear();
     }
 
     LOG_INFO("Vita3K Android initialised.");

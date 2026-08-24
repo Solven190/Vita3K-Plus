@@ -102,11 +102,6 @@ public final class InputOverlay extends SurfaceView implements OnTouchListener
   {
     super(context/*, attrs*/);
 
-    // Set the on touch listener.
-    // Do not register the overlay as a touch listener
-    // Instead let EmuSurface forward touch events
-    setOnTouchListener(this);
-
     // Force draw
     setWillNotDraw(false);
 

@@ -29,6 +29,7 @@
 #include <cstring>
 #include <dirent.h>
 #include <string>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace mem_diag {
@@ -73,12 +74,17 @@ static void dmabuf_totals(uint32_t &count, uint64_t &bytes) {
         if (strstr(link_buf, "dmabuf") == nullptr)
             continue;
         count++;
+        uint64_t size = UINT64_MAX;
         snprintf(path_buf, sizeof(path_buf), "/proc/self/fdinfo/%s", ent->d_name);
-        if (read_small_file(path_buf, info_buf, sizeof(info_buf))) {
-            const uint64_t size = field_value(info_buf, "size"); // bytes in fdinfo
-            if (size != UINT64_MAX)
-                bytes += size;
+        if (read_small_file(path_buf, info_buf, sizeof(info_buf)))
+            size = field_value(info_buf, "size"); // bytes in fdinfo
+        if (size == UINT64_MAX || size == 0) {
+            struct stat st{};
+            if (fstatat(dir_fd, ent->d_name, &st, 0) == 0 && st.st_size > 0)
+                size = static_cast<uint64_t>(st.st_size);
         }
+        if (size != UINT64_MAX)
+            bytes += size;
     }
     closedir(dir);
 }
@@ -108,6 +114,8 @@ void log_memory_snapshot(const char *tag) {
 
     long oom_adj = LONG_MIN;
     if (read_small_file("/proc/self/oom_score_adj", buf, sizeof(buf)))
+        oom_adj = strtol(buf, nullptr, 10);
+    else if (read_small_file("/proc/self/oom_score", buf, sizeof(buf)))
         oom_adj = strtol(buf, nullptr, 10);
 
     uint32_t dmabuf_count = 0;

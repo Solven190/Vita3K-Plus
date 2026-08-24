@@ -32,6 +32,7 @@
 #include <config/state.h>
 #include <config/version.h>
 #include <display/state.h>
+#include <mem/functions.h>
 #include <shader/spirv_recompiler.h>
 #include <util/align.h>
 #include <util/android_driver.h>
@@ -1650,6 +1651,15 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
             return map_memory_page_table_fallback(mem, address, size);
         }
 
+        if (!test_arm64_atomics_on(mapped_location)) {
+            static std::atomic<uint32_t> atomic_probe_failures{ 0 };
+            const uint32_t n = atomic_probe_failures.fetch_add(1, std::memory_order_relaxed) + 1;
+            LOG_ERROR("ARM64 atomics fault on the AHardwareBuffer mapping for 0x{:X} ({} so far) — falling back to page-table mapping for this range", address.address(), n);
+            _AHardwareBuffer_unlock(buffer, nullptr);
+            _AHardwareBuffer_release(buffer);
+            return map_memory_page_table_fallback(mem, address, size);
+        }
+
         vk::DeviceMemory device_memory;
         // vulkan.hpp throws on failure: degrade to the fallback mapping, never terminate the process
         try {
@@ -1658,6 +1668,10 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
                 const vk::AndroidHardwareBufferPropertiesANDROID hardware_props = device.getAndroidHardwareBufferPropertiesANDROID(*buffer);
 
                 const int mapped_memory_type = find_suitable_mapped_type(hardware_props.memoryTypeBits);
+                if (mapped_memory_type >= 0)
+                    LOG_INFO("NativeBuffer 0x{:X}: import memoryTypeBits=0x{:X} chose type {} ({})", address.address(),
+                        hardware_props.memoryTypeBits, mapped_memory_type,
+                        vk::to_string(physical_device_memory.memoryTypes[mapped_memory_type].propertyFlags));
                 if (mapped_memory_type < 0) {
                     report_no_coherent("AHardwareBuffer");
                     _AHardwareBuffer_unlock(buffer, nullptr);
