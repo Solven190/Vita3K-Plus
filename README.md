@@ -10,13 +10,17 @@ https://github.com/nckstwrt/Vita3K-Plus/releases
 
 # v1.1 (Not Yet Released)
 - **Dead Or Alive 5 Plus** - Working - On Android requires Adreno, Turnip and the new setting Thread Scheduling Accuracy On
-- **Metal Gear Solid 3** - Freezes fixed/worked around. Blending graphics fixed
+- **Metal Gear Solid 3** - Freezes fixed/worked around. Blending graphics fixed. On-Screen Touchpad fixes.
 - **Resistance** - Rendering issues fixed on Android
+- **Killzone** - Fix for the crash occurring at level 5
+- **Neptunia Re;Birth1** - Fix for crash after selecting New Game and background images not showing
 - **Little Big Planet** - "Vignette" shading and background images fixed
 - **Ys: Memories of Celcetta** Graphics Fixed
 - **Ragnarok Odyssey ACE** Graphics Fixed
 - **ModNation: Racers Road Trip** - Regression Fixed
+- **RESOGUN** - Graphics issues now fixed
 - Defaults now to External Host for Windows and Native Buffer on Android. **Use these Memory Mapping options for the best compatibility**
+- Lots of memory improvements
 
 # v1.0
 - **Killzone** Plays well and looks amazing
