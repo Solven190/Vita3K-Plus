@@ -27,6 +27,7 @@
 #include <modules/module_parent.h>
 #include <renderer/functions.h>
 #include <util/log.h>
+#include <util/mem_snapshot.h>
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
@@ -97,6 +98,7 @@ bool initialize_session(const fs::path &storage_path, Root &root_paths, std::uni
         const char *build_kind = "debug/unoptimized";
 #endif
         LOG_INFO("BUILD IDENTITY: {} | compiled {} {} (this TU)", build_kind, __DATE__, __TIME__);
+        mem_diag::log_memory_snapshot("session-start");
 
         if (!cfg.tu_debug.empty()) {
             setenv("TU_DEBUG", cfg.tu_debug.c_str(), 1);
@@ -172,6 +174,7 @@ JNIEXPORT void JNICALL
 Java_org_vita3k_emulator_NativeLib_onTrimMemory(JNIEnv *, jclass, jint level) {
     // Android is warning it may reclaim memory and/or kill us
     LOG_WARN("[ANDROID MEMORY] onTrimMemory level={} - OS under memory pressure, an OOM kill may follow", static_cast<int>(level));
+    mem_diag::log_memory_snapshot("onTrimMemory");
     logging::flush();
 
     constexpr int trim_running_low = 10;
@@ -188,6 +191,22 @@ Java_org_vita3k_emulator_NativeLib_onTrimMemory(JNIEnv *, jclass, jint level) {
     while (static_cast<int>(level) > seen
         && !pending.compare_exchange_weak(seen, static_cast<int>(level), std::memory_order_relaxed))
         ;
+}
+
+JNIEXPORT void JNICALL
+Java_org_vita3k_emulator_NativeLib_logDiagnostics(JNIEnv *env, jclass, jstring text_str) {
+    const std::string text = jstring_to_string(env, text_str);
+    size_t start = 0;
+    while (start <= text.size()) {
+        const size_t end = text.find('\n', start);
+        const std::string line = text.substr(start, (end == std::string::npos) ? std::string::npos : end - start);
+        if (!line.empty())
+            LOG_INFO("[ANDROID DIAG] {}", line);
+        if (end == std::string::npos)
+            break;
+        start = end + 1;
+    }
+    logging::flush();
 }
 
 JNIEXPORT jboolean JNICALL
@@ -209,6 +228,17 @@ Java_org_vita3k_emulator_NativeLib_init(JNIEnv *env, jclass, jstring storage_pat
     session.root_paths = std::move(root_paths);
     session.emuenv = std::move(emuenv);
     session.app_session_controller = std::make_unique<app::AppSessionController>(*session.emuenv);
+
+    if (jclass diag_class = env->FindClass("org/vita3k/emulator/AndroidDiagnostics")) {
+        const jmethodID diag_method = env->GetStaticMethodID(diag_class, "logStartupDiagnostics", "()V");
+        if (diag_method != nullptr)
+            env->CallStaticVoidMethod(diag_class, diag_method);
+        if (env->ExceptionCheck())
+            env->ExceptionClear();
+        env->DeleteLocalRef(diag_class);
+    } else if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+    }
 
     LOG_INFO("Vita3K Android initialised.");
     return JNI_TRUE;

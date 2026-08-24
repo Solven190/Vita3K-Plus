@@ -575,6 +575,11 @@ void VKTextureCache::upload_texture_impl(SceGxmTextureBaseFormat base_format, ui
 }
 
 void VKTextureCache::upload_done() {
+    if (!is_texture_transfer_ready) {
+        LOG_ERROR_ONCE("Texture upload produced no data (see preceding texture errors) - skipping layout transition");
+        return;
+    }
+
     // transition the texture back to read only
     vk::ImageSubresourceRange range{
         .aspectMask = vk::ImageAspectFlagBits::eColor,

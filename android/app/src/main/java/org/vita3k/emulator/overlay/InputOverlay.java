@@ -880,6 +880,20 @@ public final class InputOverlay extends SurfaceView implements OnTouchListener
     }
   }
 
+  public boolean isPointerOwned(int pointerId)
+  {
+    for (InputOverlayDrawableButton button : overlayButtons)
+      if (button.getTrackId() == pointerId)
+        return true;
+    for (InputOverlayDrawableDpad dpad : overlayDpads)
+      if (dpad.getTrackId() == pointerId)
+        return true;
+    for (InputOverlayDrawableJoystick joystick : overlayJoysticks)
+      if (joystick.getTrackId() == pointerId)
+        return true;
+    return false;
+  }
+
   public boolean isInEditMode()
   {
     return mIsInEditMode;

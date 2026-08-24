@@ -36,6 +36,7 @@
 #include <util/align.h>
 #include <util/android_driver.h>
 #include <util/log.h>
+#include <util/mem_snapshot.h>
 #include <vkutil/vkutil.h>
 
 #include <overlay/display_manager.h>
@@ -1237,6 +1238,9 @@ void VKState::cleanup() {
         }
     }
     mapped_memories.clear();
+#ifdef __ANDROID__
+    trim_native_buffer_cache(0);
+#endif
     buffer_trapping.trapped_buffers.clear();
 
     default_image.destroy();
@@ -1446,6 +1450,7 @@ void VKState::swap_window() {
         device.waitIdle();
         const uint64_t freed = texture_cache.release_all_cached_textures();
         LOG_WARN("[ANDROID MEMORY] trim level {}: released {} MiB of cached textures", trim_level, freed / (1024 * 1024));
+        mem_diag::log_memory_snapshot("post-trim");
         logging::flush();
     }
 
@@ -1460,6 +1465,7 @@ void VKState::swap_window() {
         if (next_heartbeat != 0) {
             LOG_DEBUG("renderer heartbeat: {} frames presented, pipelines created={} failed={}",
                 frames_presented, pipeline_cache.pipelines_created.load(), pipeline_cache.pipelines_failed.load());
+            mem_diag::log_memory_snapshot("heartbeat");
         }
         next_heartbeat = time_s + 5;
     }
@@ -1605,6 +1611,23 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
     switch (mapping_method) {
     case MappingMethod::NativeBuffer: {
 #ifdef __ANDROID__
+        // reuse a previously allocated buffer for this exact range if we kept one
+        constexpr bool cache_native_buffers = true;
+        const uint64_t cache_key = (static_cast<uint64_t>(address.address()) << 32) | size;
+        if (cache_native_buffers) {
+            auto cached = native_buffer_cache.find(cache_key);
+            if (cached != native_buffer_cache.end()) {
+                uint8_t *cached_location = reinterpret_cast<uint8_t *>(cached->second.mapped_location);
+                const uint32_t cached_size = cached->second.mapping.size;
+                mapped_memories[address.address()] = std::move(cached->second.mapping);
+                add_external_mapping(mem, address.address(), size, cached_location);
+                native_buffer_cache_bytes -= cached_size;
+                native_buffer_cache.erase(cached);
+                LOG_INFO_ONCE("Reusing cached AHardwareBuffers across unmap/remap (avoids repeated dma-buf allocation)");
+                break;
+            }
+        }
+
         // if we get there, this means we support the hardware buffer extension
         AHardwareBuffer_Desc buffer_desc{
             .width = static_cast<uint32_t>(size + KiB(4)),
@@ -1846,8 +1869,34 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
         break;
     }
 
+    // memory state right after every mapping - if an LMK kill follows one, the last snapshot is the evidence
+    mem_diag::log_memory_snapshot("map_memory");
     return true;
 }
+
+#ifdef __ANDROID__
+void VKState::release_cached_native_buffer(CachedNativeBuffer &cached) {
+    device.destroyBuffer(cached.mapping.buffer);
+    if (auto *ext = std::get_if<ExternalBuffer>(&cached.mapping.buffer_impl)) {
+        device.freeMemory(ext->memory);
+        if (ext->extra) {
+            AHardwareBuffer *hardware_buffer = reinterpret_cast<AHardwareBuffer *>(ext->extra);
+            _AHardwareBuffer_unlock(hardware_buffer, nullptr);
+            if (support_android_buffer_import)
+                _AHardwareBuffer_release(hardware_buffer);
+        }
+    }
+}
+
+void VKState::trim_native_buffer_cache(uint64_t budget) {
+    while (native_buffer_cache_bytes > budget && !native_buffer_cache.empty()) {
+        auto victim = native_buffer_cache.begin();
+        native_buffer_cache_bytes -= victim->second.mapping.size;
+        release_cached_native_buffer(victim->second);
+        native_buffer_cache.erase(victim);
+    }
+}
+#endif
 
 void VKState::unmap_memory(MemState &mem, Ptr<void> address) {
     assert(features.enable_memory_mapping);
@@ -1888,7 +1937,22 @@ void VKState::unmap_memory(MemState &mem, Ptr<void> address) {
 
 #ifdef __ANDROID__
     case MappingMethod::NativeBuffer: {
-        remove_external_mapping(mem, address.cast<uint8_t>().get(mem), ite->second.size);
+        uint8_t *mapped_location = address.cast<uint8_t>().get(mem);
+        remove_external_mapping(mem, mapped_location, ite->second.size);
+
+        constexpr uint64_t native_buffer_cache_budget = MiB(256);
+        constexpr bool cache_native_buffers = true;
+        const uint64_t cache_key = (static_cast<uint64_t>(address.address()) << 32) | ite->second.size;
+        if (cache_native_buffers && !native_buffer_cache.contains(cache_key)) {
+            const uint32_t cached_size = ite->second.size;
+            CachedNativeBuffer entry{ std::move(ite->second), mapped_location };
+            native_buffer_cache.insert_or_assign(cache_key, std::move(entry));
+            native_buffer_cache_bytes += cached_size;
+            mapped_memories.erase(ite);
+            trim_native_buffer_cache(native_buffer_cache_budget);
+            return;
+        }
+
         device.destroyBuffer(ite->second.buffer);
         ExternalBuffer &buffer = std::get<ExternalBuffer>(ite->second.buffer_impl);
         device.freeMemory(buffer.memory);
@@ -1911,6 +1975,7 @@ void VKState::unmap_memory(MemState &mem, Ptr<void> address) {
         break;
     }
     mapped_memories.erase(ite);
+    mem_diag::log_memory_snapshot("unmap_memory");
 }
 
 std::tuple<vk::Buffer, uint32_t> VKState::get_matching_mapping(const Ptr<void> address) {

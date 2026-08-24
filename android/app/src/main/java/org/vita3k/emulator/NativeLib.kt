@@ -19,6 +19,7 @@ object NativeLib {
     // --- Initialization ---
     external fun prepareFrontend(): Boolean
     external fun onTrimMemory(level: Int)
+    external fun logDiagnostics(text: String)
     external fun init(storagePath: String): Boolean
     external fun isInitialized(): Boolean
     external fun isOfficialBuild(): Boolean

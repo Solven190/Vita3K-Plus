@@ -27,6 +27,7 @@
 #include <renderer/vulkan/types.h>
 
 #include <mutex>
+#include <unordered_map>
 
 struct Config;
 
@@ -102,6 +103,17 @@ struct VKState : public renderer::State {
 
     // only used when memory mapping is enabled
     std::map<Address, MappedMemory, std::greater<Address>> mapped_memories;
+
+#ifdef __ANDROID__
+    struct CachedNativeBuffer {
+        MappedMemory mapping;
+        void *mapped_location;
+    };
+    std::unordered_map<uint64_t, CachedNativeBuffer> native_buffer_cache;
+    uint64_t native_buffer_cache_bytes = 0;
+    void release_cached_native_buffer(CachedNativeBuffer &cached);
+    void trim_native_buffer_cache(uint64_t budget);
+#endif
     // used with double buffer memory trapping
     BufferTrapping buffer_trapping;
     // modify the behavior of trapping on vertex buffers if there are shader stores
