@@ -46,6 +46,7 @@ void set_uniform_buffer(VKContext &context, MemState &mem, const ShaderProgram *
         }
 
         const uint64_t buffer_address = context.state.get_matching_device_address(data.address());
+
         if (vertex_shader) {
             context.curr_vert_ublock.set_buffer_address(block_num, buffer_address);
         } else {
@@ -335,6 +336,40 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     // the mask bit is not emulated here, so a mask-update program would just paint writing_mask over the whole target (gl/draw.cpp skips these too)
     if (!context.state.features.use_mask_bit && context.record.fragment_program.get(mem)->is_maskupdate)
         return;
+
+    // DOA5 black clothes fix:
+    {
+        const SceGxmVertexProgram *gxm_vp = context.record.vertex_program.get(mem);
+        if (gxm_vp && gxm_vp->renderer_data) {
+            VertexProgram *vp_data = gxm_vp->renderer_data.get();
+            if (vp_data->varying_location_mask == 0xFFFFFFFFu) {
+                uint32_t written_mask = 0;
+                const SceGxmProgram *vp_gxp = gxm_vp->program.get(mem);
+                if (vp_gxp) {
+                    const SceGxmVertexProgramOutputs vo_mask = gxp::get_vertex_outputs(*vp_gxp);
+                    static constexpr struct {
+                        SceGxmVertexProgramOutputs vo;
+                        int location;
+                    } vo_locations[] = {
+                        { SCE_GXM_VERTEX_PROGRAM_OUTPUT_POSITION, 0 }, { SCE_GXM_VERTEX_PROGRAM_OUTPUT_COLOR0, 1 },
+                        { SCE_GXM_VERTEX_PROGRAM_OUTPUT_COLOR1, 2 }, { SCE_GXM_VERTEX_PROGRAM_OUTPUT_FOG, 3 },
+                        { SCE_GXM_VERTEX_PROGRAM_OUTPUT_TEXCOORD0, 4 }, { SCE_GXM_VERTEX_PROGRAM_OUTPUT_TEXCOORD1, 5 },
+                        { SCE_GXM_VERTEX_PROGRAM_OUTPUT_TEXCOORD2, 6 }, { SCE_GXM_VERTEX_PROGRAM_OUTPUT_TEXCOORD3, 7 },
+                        { SCE_GXM_VERTEX_PROGRAM_OUTPUT_TEXCOORD4, 8 }, { SCE_GXM_VERTEX_PROGRAM_OUTPUT_TEXCOORD5, 9 },
+                        { SCE_GXM_VERTEX_PROGRAM_OUTPUT_TEXCOORD6, 10 }, { SCE_GXM_VERTEX_PROGRAM_OUTPUT_TEXCOORD7, 11 },
+                        { SCE_GXM_VERTEX_PROGRAM_OUTPUT_TEXCOORD8, 12 }, { SCE_GXM_VERTEX_PROGRAM_OUTPUT_TEXCOORD9, 13 },
+                        { SCE_GXM_VERTEX_PROGRAM_OUTPUT_PSIZE, 14 }
+                    };
+                    for (const auto &e : vo_locations)
+                        if (vo_mask & e.vo)
+                            written_mask |= 1u << e.location;
+                }
+                vp_data->varying_location_mask = written_mask;
+                LOG_INFO("[ITERMASK] vertex program varying mask = 0x{:04X}", written_mask);
+            }
+            context.curr_frag_ublock.set_iterator_written_mask(vp_data->varying_location_mask);
+        }
+    }
 
     void *indices_ptr = indices.get(mem);
 

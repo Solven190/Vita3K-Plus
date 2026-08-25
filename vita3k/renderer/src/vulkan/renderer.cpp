@@ -32,6 +32,7 @@
 #include <config/state.h>
 #include <config/version.h>
 #include <display/state.h>
+#include <kernel/state.h>
 #include <mem/functions.h>
 #include <shader/spirv_recompiler.h>
 #include <util/align.h>
@@ -831,8 +832,9 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
             support_fsr = static_cast<bool>(props.get<vk::PhysicalDeviceShaderFloat16Int8Features>().shaderFloat16);
         }
 
-        if (support_rasterized_order_access && config.disable_raster_order) {
-            LOG_INFO("Rasterization order attachment access disabled by config");
+        constexpr bool force_disable_raster_order = false;
+        if (support_rasterized_order_access && (config.disable_raster_order || force_disable_raster_order)) {
+            LOG_INFO("Rasterization order attachment access disabled by {}", config.disable_raster_order ? "config" : "debug force");
             support_rasterized_order_access = false;
         }
         if (support_rasterized_order_access) {
@@ -1034,6 +1036,12 @@ void VKState::late_init(const Config &cfg, const std::string_view game_id, MemSt
 
     bool use_high_accuracy = cfg.current_config.high_accuracy;
     surface_sync_clamp_rt = cfg.surface_sync_clamp_rt;
+
+    constexpr bool force_direct_fragcolor_variant = false;
+    if (force_direct_fragcolor_variant && features.support_shader_interlock) {
+        LOG_WARN("FORCING direct_fragcolor (subpass-input fetch) shader variant for debugging - interlock disabled");
+        features.support_shader_interlock = false;
+    }
 
     // shader interlock is more accurate but slower
     if (features.support_shader_interlock && use_high_accuracy) {
@@ -1544,6 +1552,26 @@ void VKState::set_screen_filter(const std::string_view &filter) {
     renderer::send_single_command(*this, nullptr, renderer::CommandOpcode::SetScreenFilter, false, new std::string(filter));
 }
 
+#ifdef __ANDROID__
+static bool range_overlaps_module_segment(KernelState *kernel, Address addr, uint32_t size) {
+    if (!kernel)
+        return true;
+    const std::lock_guard<std::mutex> lock(kernel->mutex);
+    for (const auto &[modid, module] : kernel->loaded_modules) {
+        if (!module)
+            continue;
+        for (const auto &segment : module->info.segments) {
+            if (segment.memsz == 0)
+                continue;
+            const Address seg_start = segment.vaddr.address();
+            if (addr < seg_start + segment.memsz && seg_start < addr + size)
+                return true;
+        }
+    }
+    return false;
+}
+#endif
+
 bool VKState::map_memory_page_table_fallback(MemState &mem, Ptr<void> address, uint32_t size) {
     constexpr vk::BufferUsageFlags mapped_memory_flags = vk::BufferUsageFlagBits::eIndexBuffer | vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eShaderDeviceAddress | vk::BufferUsageFlagBits::eTransferDst;
     vkutil::Buffer buffer(size + KiB(4));
@@ -1612,6 +1640,13 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
     switch (mapping_method) {
     case MappingMethod::NativeBuffer: {
 #ifdef __ANDROID__
+        static std::atomic<bool> ahb_atomics_broken{ false };
+        const bool device_atomics_broken = ahb_atomics_broken.load(std::memory_order_relaxed);
+        if (device_atomics_broken && range_overlaps_module_segment(kernel, address.address(), size)) {
+            LOG_INFO("0x{:X} (size 0x{:X}) overlaps a module segment and this device's AHB mappings fault atomics - using page-table mapping for it", address.address(), size);
+            return map_memory_page_table_fallback(mem, address, size);
+        }
+
         // reuse a previously allocated buffer for this exact range if we kept one
         constexpr bool cache_native_buffers = true;
         const uint64_t cache_key = (static_cast<uint64_t>(address.address()) << 32) | size;
@@ -1651,10 +1686,11 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
             return map_memory_page_table_fallback(mem, address, size);
         }
 
-        if (!test_arm64_atomics_on(mapped_location)) {
+        if (!device_atomics_broken && !test_arm64_atomics_on(mapped_location)) {
             static std::atomic<uint32_t> atomic_probe_failures{ 0 };
             const uint32_t n = atomic_probe_failures.fetch_add(1, std::memory_order_relaxed) + 1;
             LOG_ERROR("ARM64 atomics fault on the AHardwareBuffer mapping for 0x{:X} ({} so far) — falling back to page-table mapping for this range", address.address(), n);
+            ahb_atomics_broken.store(true, std::memory_order_relaxed);
             _AHardwareBuffer_unlock(buffer, nullptr);
             _AHardwareBuffer_release(buffer);
             return map_memory_page_table_fallback(mem, address, size);

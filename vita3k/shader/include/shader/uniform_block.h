@@ -40,6 +40,7 @@ struct RenderFragUniformBlock {
     float inv_frag_width = 1.0f;
     float inv_frag_height = 1.0f;
     float raw_cast_mask = 0.0f;
+    float iterator_written_mask = 16777215.0f;
 };
 
 enum FragUniformFieldId : uint32_t {
@@ -52,7 +53,8 @@ enum FragUniformFieldId : uint32_t {
     FRAG_UNIFORM_cast_phase_mask,
     FRAG_UNIFORM_inv_frag_width,
     FRAG_UNIFORM_inv_frag_height,
-    FRAG_UNIFORM_raw_cast_mask
+    FRAG_UNIFORM_raw_cast_mask,
+    FRAG_UNIFORM_iterator_written_mask
 };
 
 template <typename T>
@@ -86,6 +88,14 @@ struct UniformBlockExtended {
         if (buffer_addresses[idx] != buffer_address) {
             changed = true;
             buffer_addresses[idx] = buffer_address;
+        }
+    }
+
+    void set_iterator_written_mask(uint32_t mask) {
+        const float as_float = static_cast<float>(mask);
+        if (base_block.iterator_written_mask != as_float) {
+            changed = true;
+            base_block.iterator_written_mask = as_float;
         }
     }
 
