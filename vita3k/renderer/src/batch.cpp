@@ -128,6 +128,8 @@ static void process_batch(renderer::State &state, const FeatureState &features, 
             handler_fn(state, mem, config, helper, features, command_list.context);
         }
 
+        state.progress_counter.fetch_add(1, std::memory_order_relaxed);
+
         Command *last_cmd = cmd;
         cmd = cmd->next;
 

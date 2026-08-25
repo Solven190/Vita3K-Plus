@@ -21,6 +21,7 @@
 #include <kernel/sync_primitives.h>
 #include <kernel/thread/thread_state.h>
 
+#include <algorithm>
 #include <array>
 #include <kernel/types.h>
 #include <util/lock_and_find.h>
@@ -1545,11 +1546,13 @@ int eventflag_poll(KernelState &kernel, const char *export_name, SceUID thread_i
     return eventflag_waitorpoll(kernel, export_name, thread_id, event_id, flags, wait, outBits, 0, false);
 }
 
-int KernelState::try_break_frame_sync_deadlock() {
+int KernelState::try_break_frame_sync_deadlock(std::vector<SceUID> &already_nudged) {
     std::vector<std::pair<SceUID, SceUInt32>> nudges;
     {
         const std::lock_guard<std::mutex> lock(mutex);
         for (auto &[uid, event] : eventflags) {
+            if (std::find(already_nudged.begin(), already_nudged.end(), uid) != already_nudged.end())
+                continue;
             const std::lock_guard<std::mutex> ev_lock(event->mutex);
             if (!event->waiting_threads || event->waiting_threads->size() == 0)
                 continue;
@@ -1575,7 +1578,8 @@ int KernelState::try_break_frame_sync_deadlock() {
         }
     }
     for (const auto &[uid, bits] : nudges) {
-        LOG_ERROR("DEADLOCK BREAKER: event flag {} has blocked waiter(s) with no satisfiable condition; setting bits {:#x} to break a frame-sync deadlock", uid, bits);
+        LOG_ERROR("DEADLOCK BREAKER: event flag {} has blocked waiter(s) with no satisfiable condition; setting bits {:#x} to break a frame-sync deadlock (once per flag per stall)", uid, bits);
+        already_nudged.push_back(uid);
         eventflag_set(*this, "deadlock_breaker", 0, uid, bits);
     }
     return static_cast<int>(nudges.size());

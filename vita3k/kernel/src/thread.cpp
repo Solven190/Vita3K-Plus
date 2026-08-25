@@ -711,6 +711,9 @@ void ThreadState::update_status(ThreadStatus status, std::optional<ThreadStatus>
     if (status == ThreadStatus::wait && delete_requested)
         return;
 
+    if (status == ThreadStatus::run)
+        kernel.thread_wake_counter.fetch_add(1, std::memory_order_relaxed);
+
     this->status = status;
     status_cond.notify_all();
 

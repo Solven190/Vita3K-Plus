@@ -1533,7 +1533,7 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_depth_stencil_for_framebuffer(Sce
                 vk::CommandBuffer cmd_buffer = reinterpret_cast<VKContext *>(state.context)->prerender_cmd;
                 full.transition_to(cmd_buffer, vkutil::ImageLayout::TransferSrc, vkutil::ds_subresource_range);
                 resampled.transition_to_discard(cmd_buffer, vkutil::ImageLayout::TransferDst, vkutil::ds_subresource_range);
-                const std::array<vk::Offset3D, 2> src_bounds{ vk::Offset3D{ 0, 0, 0 }, vk::Offset3D{ static_cast<int32_t>(src_w), static_cast<int32_t>(src_h), 1 } };
+                const std::array<vk::Offset3D, 2> src_bounds{ vk::Offset3D{ 0, 0, 0 }, vk::Offset3D{ static_cast<int32_t>(src_w - (sx - 1)), static_cast<int32_t>(src_h - (sy - 1)), 1 } };
                 const std::array<vk::Offset3D, 2> dst_bounds{ vk::Offset3D{ 0, 0, 0 }, vk::Offset3D{ static_cast<int32_t>(width), static_cast<int32_t>(height), 1 } };
                 const auto region_for = [&](vk::ImageAspectFlagBits aspect) {
                     const vk::ImageSubresourceLayers layers{ aspect, 0, 0, 1 };

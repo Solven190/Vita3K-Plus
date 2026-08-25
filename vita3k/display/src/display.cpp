@@ -173,27 +173,60 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
         {
             static uint64_t last_dumped_setframe = ~0ull;
             static uint64_t last_break_vblanks = 0;
+            static uint64_t last_progress_value = 0;
+            static uint64_t last_progress_change_vblank = 0;
+            static std::vector<SceUID> nudged_this_stall;
             const uint64_t setframe = emuenv.display.last_setframe_vblank_count.load();
             const uint64_t vblanks = emuenv.display.vblank_count.load();
             const bool unpaused = !emuenv.kernel.is_threads_paused();
             const uint64_t stall_vblanks = (setframe > 0 && vblanks > setframe) ? (vblanks - setframe) : 0;
+
+            static uint64_t last_wake_value = 0;
+            static uint64_t last_wake_change_vblank = 0;
+            const uint64_t progress_now = emuenv.renderer ? emuenv.renderer->progress_counter.load(std::memory_order_relaxed) : 0;
+            if (progress_now != last_progress_value) {
+                last_progress_value = progress_now;
+                last_progress_change_vblank = vblanks;
+            }
+            const uint64_t wakes_now = emuenv.kernel.thread_wake_counter.load(std::memory_order_relaxed);
+            if (wakes_now != last_wake_value) {
+                last_wake_value = wakes_now;
+                last_wake_change_vblank = vblanks;
+            }
+            const uint64_t renderer_idle_vblanks = vblanks - last_progress_change_vblank;
+            const uint64_t guest_idle_vblanks = vblanks - last_wake_change_vblank;
+
             // Full 10s dump for diagnostics (once per distinct stall).
             if (stall_vblanks > 600 && unpaused && last_dumped_setframe != setframe) {
                 last_dumped_setframe = setframe; // one dump per distinct stall
-                LOG_ERROR("HANG WATCHDOG: no framebuffer flip for {} vblanks — dumping guest threads", stall_vblanks);
+                LOG_ERROR("HANG WATCHDOG: no framebuffer flip for {} vblanks (renderer idle {}, guest wake-idle {}) — dumping guest threads", stall_vblanks, renderer_idle_vblanks, guest_idle_vblanks);
                 emuenv.kernel.log_thread_hang_dump();
             }
-            // Deadlock breaker for stuck event flags (runs after 3s)
-            constexpr uint64_t BREAK_STALL_VBLANKS = 180; // ~3s at 60Hz
+            // Deadlock breaker for stuck event flags
+            constexpr uint64_t BREAK_STALL_VBLANKS = 300; // ~5s at 60Hz
+            constexpr uint64_t BREAK_SLOW_VBLANKS = 900; // ~15s fallback when guest threads still wake
             if (stall_vblanks > BREAK_STALL_VBLANKS && unpaused
                 && (last_break_vblanks == 0 || vblanks - last_break_vblanks > BREAK_STALL_VBLANKS)) {
                 last_break_vblanks = vblanks;
-                const int nudged = emuenv.kernel.try_break_frame_sync_deadlock();
-                if (nudged > 0)
-                    LOG_ERROR("HANG WATCHDOG: deadlock breaker nudged {} stuck event flag(s) after {} vblanks stalled", nudged, stall_vblanks);
+                const bool full_wedge = renderer_idle_vblanks > BREAK_STALL_VBLANKS && guest_idle_vblanks > BREAK_STALL_VBLANKS;
+                const bool partial_wedge = stall_vblanks > BREAK_SLOW_VBLANKS && renderer_idle_vblanks > BREAK_SLOW_VBLANKS;
+                if (!full_wedge && !partial_wedge) {
+                    LOG_WARN("HANG WATCHDOG: no flip for {} vblanks but still alive (renderer executed a command {} vblanks ago, a guest thread woke {} vblanks ago) — breaker suppressed", stall_vblanks, renderer_idle_vblanks, guest_idle_vblanks);
+                } else {
+                    // dump BEFORE mutating anything so the log always records what was stuck on what
+                    LOG_ERROR("HANG WATCHDOG: no flip for {} vblanks, renderer idle {}, guest wake-idle {} — dumping guest threads, then breaking", stall_vblanks, renderer_idle_vblanks, guest_idle_vblanks);
+                    emuenv.kernel.log_thread_hang_dump();
+                    const int nudged = emuenv.kernel.try_break_frame_sync_deadlock(nudged_this_stall);
+                    if (nudged > 0)
+                        LOG_ERROR("HANG WATCHDOG: deadlock breaker nudged {} stuck event flag(s) after {} vblanks stalled", nudged, stall_vblanks);
+                    else
+                        LOG_ERROR("HANG WATCHDOG: genuine-looking stall but nothing to nudge ({} flag(s) already nudged this stall)", nudged_this_stall.size());
+                }
             }
-            if (stall_vblanks == 0)
+            if (stall_vblanks == 0) {
                 last_break_vblanks = 0;
+                nudged_this_stall.clear();
+            }
         }
 
         const auto time_ms = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
