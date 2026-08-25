@@ -17,6 +17,7 @@ https://github.com/nckstwrt/Vita3K-Plus/releases
 - **Little Big Planet** - "Vignette" shading and background images fixed
 - **Ys: Memories of Celcetta** Graphics Fixed
 - **Ragnarok Odyssey ACE** Graphics Fixed
+- **Ninja Gaiden Sigma 2 Plus** Graphics Fixed
 - **ModNation: Racers Road Trip** - Regression Fixed
 - **RESOGUN** - Graphics issues now fixed
 - Defaults now to External Host for Windows and Native Buffer on Android. **Use these Memory Mapping options for the best compatibility**
