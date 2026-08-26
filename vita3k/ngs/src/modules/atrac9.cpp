@@ -52,6 +52,8 @@ void Atrac9Module::on_state_change(const MemState &mem, ModuleData &data, const 
         logical->decoded_pcm.clear();
         logical->rate_resampler.reset();
         logical->superframe_staging.clear();
+        logical->starved_ticks = 0;
+        logical->in_underrun_wait = false;
         std::memset(&logical->saved_state, 0, sizeof(logical->saved_state));
     } else if (data.parent->is_keyed_off) {
         state->current_byte_position_in_buffer = 0;
@@ -102,14 +104,21 @@ bool Atrac9Module::decode_more_data(KernelState &kern, const MemState &mem, cons
             state->current_buffer = bufparam.next_buffer_index;
             logical->current_loop_count = 0;
 
-            if ((state->current_buffer == -1)
-                || !params->buffer_params[state->current_buffer].buffer
-                || (params->buffer_params[state->current_buffer].bytes_count == 0)) {
+            if (state->current_buffer == -1) {
                 data.invoke_callback(kern, mem, thread_id, SCE_NGS_AT9_END_OF_DATA, 0, 0);
 
                 // we are done
                 scheduler_lock.lock();
                 voice_lock.lock();
+                return false;
+            } else if (!params->buffer_params[state->current_buffer].buffer
+                || (params->buffer_params[state->current_buffer].bytes_count == 0)) {
+                // Chain continues but the next buffer is empty: prod the streamer and wait.
+                data.invoke_callback(kern, mem, thread_id, SCE_NGS_AT9_SWAPPED_BUFFER, prev_index,
+                    params->buffer_params[state->current_buffer].buffer.address());
+                scheduler_lock.lock();
+                voice_lock.lock();
+                logical->in_underrun_wait = true;
                 return false;
             } else {
                 data.invoke_callback(kern, mem, thread_id, SCE_NGS_AT9_SWAPPED_BUFFER, prev_index,
@@ -300,10 +309,27 @@ bool Atrac9Module::process(KernelState &kern, const MemState &mem, const SceUID 
     Atrac9RuntimeState *runtime = data.get_runtime_state<Atrac9RuntimeState>();
     assert(state);
 
-    if (state->current_buffer == -1
-        || !params->buffer_params[state->current_buffer].buffer) {
+    if (state->current_buffer == -1) {
         return true;
     }
+    if (!params->buffer_params[state->current_buffer].buffer
+        || params->buffer_params[state->current_buffer].bytes_count == 0) {
+        // Keyed on before the first buffer, or a mid-stream underrun: stay alive, do not finish.
+        constexpr int8_t max_starved_ticks = 16; // ~170ms at the default granularity
+        if (logical->starved_ticks < max_starved_ticks) {
+            logical->starved_ticks++;
+            LOG_WARN_ONCE("NGS AT9: waiting for the game to publish buffer data (was previously an instant voice kill)");
+            return false;
+        }
+        // never recovered: deliver the end the stream never reached, then finish
+        voice_lock.unlock();
+        scheduler_lock.unlock();
+        data.invoke_callback(kern, mem, thread_id, SCE_NGS_AT9_END_OF_DATA, 0, 0);
+        scheduler_lock.lock();
+        voice_lock.lock();
+        return true;
+    }
+    logical->starved_ticks = 0;
 
     logical->decoded_pcm.compact();
 
@@ -311,7 +337,8 @@ bool Atrac9Module::process(KernelState &kern, const MemState &mem, const SceUID 
     // call decode more data until we either have an error or reached end of data
     while (static_cast<int32_t>(logical->decoded_pcm.available_frames()) < data.parent->rack->system->granularity) {
         if (!decode_more_data(kern, mem, thread_id, data, params, state, logical, runtime, scheduler_lock, voice_lock)) {
-            is_finished = true;
+            is_finished = !logical->in_underrun_wait;
+            logical->in_underrun_wait = false;
             break;
         }
     }

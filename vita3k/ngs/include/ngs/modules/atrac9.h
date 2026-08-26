@@ -78,6 +78,8 @@ struct Atrac9LogicalState : public ModuleLogicalState {
     uint32_t decoder_config = 0;
     // preserve the decoder's MDCT history so the runtime decoder can be rebuilt
     Atrac9DecoderSavedState saved_state{};
+    int8_t starved_ticks = 0;
+    bool in_underrun_wait = false;
 };
 
 struct Atrac9RuntimeState : public ModuleRuntimeState {

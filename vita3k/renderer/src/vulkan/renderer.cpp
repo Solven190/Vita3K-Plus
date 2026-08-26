@@ -1553,7 +1553,7 @@ void VKState::set_screen_filter(const std::string_view &filter) {
 }
 
 #ifdef __ANDROID__
-static bool range_overlaps_module_segment(KernelState *kernel, Address addr, uint32_t size) {
+[[maybe_unused]] static bool range_overlaps_module_segment(KernelState *kernel, Address addr, uint32_t size) {
     if (!kernel)
         return true;
     const std::lock_guard<std::mutex> lock(kernel->mutex);
@@ -1642,8 +1642,9 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
 #ifdef __ANDROID__
         static std::atomic<bool> ahb_atomics_broken{ false };
         const bool device_atomics_broken = ahb_atomics_broken.load(std::memory_order_relaxed);
-        if (device_atomics_broken && range_overlaps_module_segment(kernel, address.address(), size)) {
-            LOG_INFO("0x{:X} (size 0x{:X}) overlaps a module segment and this device's AHB mappings fault atomics - using page-table mapping for it", address.address(), size);
+        // Once a device is known to fault atomics on AHB mappings all ranges go page-table
+        if (device_atomics_broken) {
+            LOG_INFO_ONCE("This device's AHardwareBuffer mappings fault ARM64 atomics - using page-table mapping for every range");
             return map_memory_page_table_fallback(mem, address, size);
         }
 

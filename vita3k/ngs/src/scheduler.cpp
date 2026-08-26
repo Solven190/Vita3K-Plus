@@ -239,6 +239,8 @@ void VoiceScheduler::update(KernelState &kern, const MemState &mem, const SceUID
         if (finished) {
             voice->is_keyed_off = true;
             voice->transition(mem, VOICE_STATE_FINALIZING);
+            voice->is_keyed_off = false;
+            stop(mem, voice);
             if (voice->finished_callback) {
                 voice_lock.unlock();
                 scheduler_lock.unlock();
@@ -246,9 +248,6 @@ void VoiceScheduler::update(KernelState &kern, const MemState &mem, const SceUID
                 scheduler_lock.lock();
                 voice_lock.lock();
             }
-            voice->is_keyed_off = false;
-
-            stop(mem, voice);
         }
 
         const bool can_route_to_master = implicit_master && std::ranges::contains(implicit_sources, voice);

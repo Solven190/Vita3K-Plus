@@ -834,12 +834,11 @@ EXPORT(SceInt32, sceNgsVoiceKeyOff, ngs::Voice *voice) {
 
     voice->is_keyed_off = true;
     voice->rack->system->voice_scheduler.off(emuenv.mem, voice);
+    voice->is_keyed_off = false;
+    voice->rack->system->voice_scheduler.stop(emuenv.mem, voice);
 
     // call the finish callback, I got no idea what the module id should be in this case
     voice->invoke_callback(emuenv.kernel, emuenv.mem, thread_id, voice->finished_callback, voice->finished_callback_user_data, 0);
-
-    voice->is_keyed_off = false;
-    voice->rack->system->voice_scheduler.stop(emuenv.mem, voice);
     return SCE_NGS_OK;
 }
 
