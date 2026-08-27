@@ -6,7 +6,7 @@ set(VITA3K_APP_VER_HI 1)
 set(VITA3K_APP_VER_MID 1)
 set(VITA3K_APP_VER_LO 0)
 # two-component display version (v1.1): the numeric LO still feeds the exe FILE_VERSION resource  // Nick - Version
-set(VITA3K_APP_VERSION "v${VITA3K_APP_VER_HI}.${VITA3K_APP_VER_MID} TESTBUILD 12")
+set(VITA3K_APP_VERSION "v${VITA3K_APP_VER_HI}.${VITA3K_APP_VER_MID} RC1")
 # Release number advertised to the updater (must match "Vita3K Build: <n>" in the GitHub release body) and rise each release
 set(VITA3K_APP_NUMBER 1)
 
@@ -214,7 +214,7 @@ if(WIN32)
 	target_sources(vita3k PRIVATE util/src/vc_runtime_checker.cpp)
 endif()
 
-target_link_libraries(vita3k PRIVATE app audio compat config cppcommon ctrl dialog display ime lang gdbstub gxm io miniz modules motion packages patch renderer shader touch util psvpfsparser)
+target_link_libraries(vita3k PRIVATE app audio codec compat config cppcommon ctrl dialog display ime lang gdbstub gxm io miniz modules motion packages patch renderer shader touch util psvpfsparser)
 if(NOT ANDROID)
 	target_link_libraries(vita3k PRIVATE gui-qt)
 endif()

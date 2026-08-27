@@ -126,6 +126,7 @@ static bool unload_var_imports(const uint32_t *nids, const Ptr<uint32_t> *entrie
 
 static bool load_func_imports(const uint32_t *nids, const Ptr<uint32_t> *entries, size_t count, uint32_t library_nid, const SegmentInfosForReloc &segments, KernelState &kernel, const MemState &mem, const std::string &lib_name) {
     const std::lock_guard<std::mutex> guard(kernel.export_nids_mutex);
+    size_t by_lib = 0, fallback = 0, unbound = 0;
     for (size_t i = 0; i < count; ++i) {
         const uint32_t nid = nids[i];
         const Ptr<uint32_t> entry = entries[i];
@@ -141,8 +142,14 @@ static bool load_func_imports(const uint32_t *nids, const Ptr<uint32_t> *entries
         Address func_address = 0;
         if (const auto it = kernel.export_nids_by_lib.find(lib_export_key(library_nid, nid)); it != kernel.export_nids_by_lib.end()) {
             func_address = it->second;
+            by_lib++;
         } else if (const auto nid_it = kernel.export_nids.find(nid); nid_it != kernel.export_nids.end()) {
             func_address = nid_it->second;
+            LOG_WARN("[LIBNID] import 0x{:08X} ({}) from lib '{}' (nid 0x{:08X}) bound by plain-NID FALLBACK to 0x{:X}",
+                nid, import_name(nid), lib_name, library_nid, nid_it->second);
+            fallback++;
+        } else {
+            unbound++;
         }
         uint32_t *const stub = entry.get(mem);
 
@@ -167,6 +174,9 @@ static bool load_func_imports(const uint32_t *nids, const Ptr<uint32_t> *entries
             }
         }
     }
+    if (count && (fallback || unbound))
+        LOG_WARN("[LIBNID] lib '{}' (nid 0x{:08X}): {} imports = {} by-lib, {} fallback, {} unbound(HLE)",
+            lib_name, library_nid, count, by_lib, fallback, unbound);
     return true;
 }
 

@@ -286,7 +286,17 @@ void KernelState::log_thread_hang_dump() {
                                                                                                         : "dormant";
         std::string line;
         if (status == ThreadStatus::run) {
-            line = fmt::format("thread {} ({}) status=run (executing or blocked inside an HLE import) last_import_nid=0x{:08X} import_lr=0x{:X}", t->name, t->id, t->last_import_nid, t->last_import_lr);
+            const uint32_t run_pc = read_pc(*t->cpu) & ~1u;
+            line = fmt::format("thread {} ({}) status=run pc~0x{:X} lr~0x{:X} last_import_nid=0x{:08X} import_lr=0x{:X}", t->name, t->id, run_pc, read_lr(*t->cpu), t->last_import_nid, t->last_import_lr);
+            for (int ri = 0; ri <= 7; ri++)
+                line += fmt::format(" r{}=0x{:X}", ri, read_reg(*t->cpu, ri));
+            uint32_t code[16];
+            if (debug_safe_copy_guest(t->get_mem(), run_pc >= 32 ? run_pc - 32 : 0, code, sizeof(code))) {
+                line += fmt::format("\n  code @0x{:X}:", run_pc >= 32 ? run_pc - 32 : 0);
+                for (const uint32_t w : code)
+                    line += fmt::format(" {:08X}", w);
+            }
+            line += "\n" + t->log_stack_traceback();
         } else {
             line = fmt::format("thread {} ({}) status={} PC=0x{:X} LR=0x{:X} last_import_nid=0x{:08X} import_lr=0x{:X} stack:\n{}", t->name, t->id, status_str, read_pc(*t->cpu), read_lr(*t->cpu), t->last_import_nid, t->last_import_lr, t->log_stack_traceback())
                 + fmt::format(" waiting_on={}#{} extra=0x{:X}", t->wait_prim_kind ? t->wait_prim_kind : "?", t->wait_prim_uid, t->wait_extra);

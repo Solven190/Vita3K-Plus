@@ -169,6 +169,9 @@ private:
     bool run_end_callback = false;
 
     MemState &mem;
+
+public:
+    MemState &get_mem() { return mem; }
 };
 
 typedef std::shared_ptr<ThreadState> ThreadStatePtr;

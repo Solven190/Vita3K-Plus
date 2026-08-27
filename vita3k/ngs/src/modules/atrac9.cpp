@@ -221,6 +221,7 @@ bool Atrac9Module::decode_more_data(KernelState &kern, const MemState &mem, cons
     runtime->decoded_superframe_samples.resize(static_cast<size_t>(runtime->decoder->get(DecoderQuery::AT9_SAMPLE_PER_SUPERFRAME)) * sizeof(float) * 2);
     uint32_t decoded_superframe_pos = 0;
     bool got_decode_error = false;
+    const int32_t pos_after_this_superframe = state->current_byte_position_in_buffer + static_cast<int32_t>(superframe_size);
     // decode a whole superframe at a time
     for (uint32_t frame = 0; frame < runtime->decoder->get(DecoderQuery::AT9_FRAMES_IN_SUPERFRAME); frame++) {
         if (!runtime->decoder->send(input, 0)) {
@@ -347,6 +348,13 @@ bool Atrac9Module::decode_more_data(KernelState &kern, const MemState &mem, cons
     }
 
     if (got_decode_error) {
+        {
+            static std::atomic<uint64_t> resyncs{ 0 };
+            const uint64_t n = resyncs.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (n <= 8 || (n % 256) == 0)
+                LOG_ERROR("[AT9DIAG] voice={} decode error - resyncing position to next superframe boundary ({} resyncs so far)", fmt::ptr(data.parent), n);
+        }
+        state->current_byte_position_in_buffer = pos_after_this_superframe;
         voice_lock.unlock();
         scheduler_lock.unlock();
 
