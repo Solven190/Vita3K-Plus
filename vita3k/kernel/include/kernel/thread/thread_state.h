@@ -33,6 +33,8 @@ struct CPUContext;
 
 struct ThreadState;
 
+extern thread_local ThreadState *g_tls_guest_thread;
+
 void guest_sched_set_cores(int cores);
 void guest_sched_release_for_block();
 void guest_sched_forget_cpu(CPUState *cpu);

@@ -45,6 +45,32 @@ object AndroidDiagnostics {
             .append('\n')
     }
 
+    private fun appendTombstoneSummary(exit: ApplicationExitInfo, sb: StringBuilder) {
+        if (Build.VERSION.SDK_INT < 31) return
+        if (exit.reason != ApplicationExitInfo.REASON_CRASH_NATIVE) return
+        try {
+            val stream = exit.traceInputStream ?: run {
+                sb.append("  tombstone: not available\n"); return
+            }
+            val bytes = stream.use { it.readBytes() }
+            val runs = ArrayList<String>()
+            val cur = StringBuilder()
+            for (b in bytes) {
+                val c = b.toInt().toChar()
+                if (c in ' '..'~') cur.append(c)
+                else {
+                    if (cur.length >= 8) runs.add(cur.toString())
+                    cur.setLength(0)
+                }
+            }
+            if (cur.length >= 8) runs.add(cur.toString())
+            sb.append("  tombstone strings (").append(runs.size).append(" total, first 60):\n")
+            for (r in runs.take(60)) sb.append("    ").append(r.take(200)).append('\n')
+        } catch (e: Exception) {
+            sb.append("  tombstone: read failed: ").append(e).append('\n')
+        }
+    }
+
     private fun appendExitReasons(context: Context, sb: StringBuilder) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
             sb.append("previous exit reasons: unavailable below Android 11 (API ")
@@ -67,6 +93,7 @@ object AndroidDiagnostics {
                 .append(" pssAtDeath=").append(exit.pss / 1024).append(" MiB")
                 .append(" desc=").append(exit.description ?: "-")
                 .append('\n')
+            appendTombstoneSummary(exit, sb)
         }
     }
 

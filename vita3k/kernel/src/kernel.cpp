@@ -242,6 +242,10 @@ void KernelState::resume_threads() {
 }
 
 int KernelState::stop_world(SceUID except_id, std::chrono::milliseconds budget) {
+    last_world_stop_epoch_ms.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       std::chrono::steady_clock::now().time_since_epoch())
+                                       .count(),
+        std::memory_order_relaxed);
     {
         const std::lock_guard<std::mutex> lock(mutex);
         world_stopped_threads.clear();
@@ -328,6 +332,7 @@ void KernelState::deinit(MemState &mem) {
     {
         std::lock_guard<std::mutex> lock(export_nids_mutex);
         export_nids.clear();
+        export_nids_by_lib.clear();
         func_binding_infos.clear();
         var_binding_infos.clear();
         module_uid_by_nid.clear();

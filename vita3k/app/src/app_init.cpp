@@ -490,6 +490,9 @@ void shutdown_app_runtime(EmuEnvState &state) {
     state.net.abort_all();
     state.http.shutdown_connections();
 
+    if (state.renderer)
+        state.renderer->command_buffer_queue.abort();
+
     state.kernel.process_exit();
 
     state.motion.reset_runtime();

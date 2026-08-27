@@ -64,6 +64,8 @@ bool is_valid_addr(const MemState &state, Address addr);
 bool is_valid_addr_synced(MemState &state, Address addr);
 Address host_to_guest(const MemState &state, const void *host);
 bool is_valid_addr_range(const MemState &state, Address start, Address end);
+bool debug_safe_copy_guest(const MemState &state, Address addr, void *dst, uint32_t size);
+bool debug_safe_write_guest(MemState &state, Address addr, const void *src, uint32_t size);
 bool handle_access_violation(MemState &state, uint8_t *addr, bool write) noexcept;
 bool test_arm64_atomics_on(void *ptr);
 void set_fault_context_provider(std::string (*provider)());

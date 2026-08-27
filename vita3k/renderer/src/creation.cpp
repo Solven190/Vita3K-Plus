@@ -176,11 +176,38 @@ struct WorldStopScope {
     }
 };
 
+inline constexpr bool DEFER_IDENTICAL_REMAP = true;
+static Address deferred_unmap_addr = 0;
+
+static void flush_deferred_unmap(renderer::State &renderer, MemState &mem, SceUID caller_thread) {
+    if (!deferred_unmap_addr)
+        return;
+    const Address flush_addr = deferred_unmap_addr;
+    deferred_unmap_addr = 0;
+    const WorldStopScope world_stop(renderer, mem, caller_thread, flush_addr, 0);
+    if (renderer.current_backend == Backend::Vulkan)
+        dynamic_cast<vulkan::VKState &>(renderer).unmap_memory(mem, Ptr<void>(flush_addr));
+}
+
 COMMAND(handle_memory_map) {
     TRACY_FUNC_COMMANDS(handle_memory_map);
     const Ptr<void> addr = helper.pop<Ptr<void>>();
     const uint32_t size = helper.pop<uint32_t>();
     const SceUID caller_thread = static_cast<SceUID>(helper.pop<uint32_t>());
+
+    if (DEFER_IDENTICAL_REMAP && renderer.current_backend == Backend::Vulkan && deferred_unmap_addr) {
+        auto &vk = dynamic_cast<vulkan::VKState &>(renderer);
+        const auto ite = vk.mapped_memories.find(addr.address());
+        if (deferred_unmap_addr == addr.address() && ite != vk.mapped_memories.end() && ite->second.size == size) {
+            deferred_unmap_addr = 0;
+            static uint64_t revived = 0;
+            if (((++revived) % 1024) == 1)
+                LOG_INFO("[NBCACHE] identical remap collapsed to a no-op ({} so far)", revived);
+            complete_command(renderer, helper, 0);
+            return;
+        }
+        flush_deferred_unmap(renderer, mem, caller_thread);
+    }
 
     {
         const WorldStopScope world_stop(renderer, mem, caller_thread, addr.address(), size);
@@ -198,6 +225,14 @@ COMMAND(handle_memory_unmap) {
 
     const Ptr<void> addr = helper.pop<Ptr<void>>();
     const SceUID caller_thread = static_cast<SceUID>(helper.pop<uint32_t>());
+
+    if (DEFER_IDENTICAL_REMAP && renderer.current_backend == Backend::Vulkan
+        && dynamic_cast<vulkan::VKState &>(renderer).mapped_memories.contains(addr.address())) {
+        flush_deferred_unmap(renderer, mem, caller_thread);
+        deferred_unmap_addr = addr.address();
+        complete_command(renderer, helper, 0);
+        return;
+    }
 
     {
         const WorldStopScope world_stop(renderer, mem, caller_thread, addr.address(), 0);

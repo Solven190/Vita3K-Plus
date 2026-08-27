@@ -38,6 +38,7 @@
 #include <setjmp.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <unwind.h>
 #endif
 
 constexpr uint32_t STANDARD_PAGE_SIZE = KiB(4);
@@ -164,6 +165,42 @@ bool is_valid_addr_range(const MemState &state, Address start, Address end) {
     const uint32_t start_page = start / STANDARD_PAGE_SIZE;
     const uint32_t end_page = (end + STANDARD_PAGE_SIZE - 1) / STANDARD_PAGE_SIZE;
     return state.allocator.free_slot_count(start_page, end_page) == 0;
+}
+
+bool debug_safe_copy_guest(const MemState &state, Address addr, void *dst, uint32_t size) {
+    if (!addr || addr + size < addr)
+        return false;
+#ifdef _WIN32
+    __try {
+        memcpy(dst, &state.memory[addr], size);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+#else
+    if (!is_valid_addr_range(state, addr, addr + size))
+        return false;
+    memcpy(dst, &state.memory[addr], size);
+    return true;
+#endif
+}
+
+bool debug_safe_write_guest(MemState &state, Address addr, const void *src, uint32_t size) {
+    if (!addr || addr + size < addr)
+        return false;
+#ifdef _WIN32
+    __try {
+        memcpy(&state.memory[addr], src, size);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+#else
+    if (!is_valid_addr_range(state, addr, addr + size))
+        return false;
+    memcpy(&state.memory[addr], src, size);
+    return true;
+#endif
 }
 
 static Address alloc_inner(MemState &state, uint32_t start_page, uint32_t page_count, const char *name, const bool force) {
@@ -863,6 +900,24 @@ static void signal_handler(int sig, siginfo_t *info, void *uct) noexcept {
 
     LOG_CRITICAL("[CRASH] fatal signal {} (si_code {}) at address 0x{:X} - pc {} - lr {} - flushing log and aborting",
         sig, info->si_code, reinterpret_cast<uintptr_t>(info->si_addr), describe(crash_pc), describe(crash_lr));
+#ifndef _WIN32
+    {
+        struct Bt {
+            uintptr_t pcs[28];
+            int n = 0;
+        } bt;
+        _Unwind_Backtrace([](struct _Unwind_Context *uctx, void *arg) -> _Unwind_Reason_Code {
+            Bt *b = static_cast<Bt *>(arg);
+            const uintptr_t pc = _Unwind_GetIP(uctx);
+            if (pc && b->n < 28)
+                b->pcs[b->n++] = pc;
+            return b->n >= 28 ? _URC_END_OF_STACK : _URC_NO_REASON;
+        },
+            &bt);
+        for (int i = 0; i < bt.n; i++)
+            LOG_CRITICAL("[CRASH] frame #{:02}: {}", i, describe(bt.pcs[i]));
+    }
+#endif
     logging::flush();
     signal(sig, SIG_DFL);
     raise(sig);

@@ -27,6 +27,7 @@
 
 #include <chrono>
 #include <future>
+#include <thread>
 #include <vector>
 
 #include <config/state.h>
@@ -1253,6 +1254,7 @@ void VKState::cleanup() {
     buffer_trapping.trapped_buffers.clear();
 
     default_image.destroy();
+    default_raw_image.destroy();
     default_buffer.destroy();
 
     for (auto &pool : frame_descriptor_pools)
@@ -1972,6 +1974,14 @@ void VKState::unmap_memory(MemState &mem, Ptr<void> address) {
             if (render_abort.load(std::memory_order_relaxed) || request_queue.is_aborted())
                 break;
         }
+    }
+
+    // A range that fell back to page-table holds a vkutil::Buffer
+    if ((mapping_method == MappingMethod::NativeBuffer || mapping_method == MappingMethod::ExernalHost)
+        && std::holds_alternative<vkutil::Buffer>(ite->second.buffer_impl)) {
+        remove_external_mapping(mem, address.cast<uint8_t>().get(mem), ite->second.size);
+        mapped_memories.erase(ite);
+        return;
     }
 
     switch (mapping_method) {

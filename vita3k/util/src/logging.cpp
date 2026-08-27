@@ -15,6 +15,8 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+#include <exception>
+#include <typeinfo>
 #include <util/fork_build.h>
 #include <util/log.h>
 
@@ -101,6 +103,22 @@ ExitCode init(const Root &root_paths, bool use_stdout) {
         return InitConfigFailed;
     LOG_INFO("================= Vita3K session start =================");
     LOG_INFO("FORK BUILD seq {} compiled {} {} | {}", FORK_BUILD_SEQ, __DATE__, __TIME__, FORK_BUILD_CHANGES);
+
+    std::set_terminate([]() {
+        if (const std::exception_ptr eptr = std::current_exception()) {
+            try {
+                std::rethrow_exception(eptr);
+            } catch (const std::exception &ex) {
+                LOG_CRITICAL("[CRASH] std::terminate: uncaught exception {}: {}", typeid(ex).name(), ex.what());
+            } catch (...) {
+                LOG_CRITICAL("[CRASH] std::terminate: uncaught non-std exception");
+            }
+        } else {
+            LOG_CRITICAL("[CRASH] std::terminate called with no active exception");
+        }
+        spdlog::default_logger()->flush();
+        std::abort();
+    });
 
     spdlog::set_error_handler([](const std::string &msg) {
         std::cerr << "spdlog error: " << msg << std::endl;

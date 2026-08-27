@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cpu/functions.h>
+#include <cstring>
 #include <thread>
 
 #ifdef _WIN32
@@ -36,8 +37,12 @@
 #include <dialog/state.h>
 #include <display/state.h>
 #include <emuenv/state.h>
+#include <gxm/state.h>
 #include <kernel/state.h>
 #include <kernel/sync_primitives.h>
+#include <kernel/thread/thread_state.h>
+#include <mem/functions.h>
+#include <mem/ptr.h>
 #include <renderer/state.h>
 
 #include <chrono>
@@ -173,6 +178,7 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
         {
             static uint64_t last_dumped_setframe = ~0ull;
             static uint64_t last_break_vblanks = 0;
+            static uint64_t last_provable_break_setframe = ~0ull;
             static uint64_t last_progress_value = 0;
             static uint64_t last_progress_change_vblank = 0;
             static std::vector<SceUID> nudged_this_stall;
@@ -201,7 +207,33 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
                 last_dumped_setframe = setframe; // one dump per distinct stall
                 LOG_ERROR("HANG WATCHDOG: no framebuffer flip for {} vblanks (renderer idle {}, guest wake-idle {}) — dumping guest threads", stall_vblanks, renderer_idle_vblanks, guest_idle_vblanks);
                 emuenv.kernel.log_thread_hang_dump();
+                LOG_ERROR("HANG DISPLAY QUEUE: depth={} worker_state={} (0=idle-waiting-entry 1=wait-old-sync 2=wait-new-sync 3=running-callback) entries_done={}",
+                    emuenv.gxm.display_queue.size(), emuenv.gxm.display_worker_state.load(), emuenv.gxm.display_entries_done.load());
+                emuenv.kernel.log_eventflag_history();
             }
+            // Cycle breaker
+            constexpr uint64_t PROVABLE_DRYRUN_VBLANKS = 120;
+            constexpr uint64_t PROVABLE_BREAK_VBLANKS = 900;
+            static uint64_t last_provable_dryrun_setframe = ~0ull;
+            const int64_t now_epoch_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+            const bool world_stop_quiet = (now_epoch_ms - emuenv.kernel.last_world_stop_epoch_ms.load(std::memory_order_relaxed)) >= 5000;
+            if (stall_vblanks > PROVABLE_DRYRUN_VBLANKS && unpaused && renderer_idle_vblanks > PROVABLE_DRYRUN_VBLANKS && last_provable_dryrun_setframe != setframe) {
+                last_provable_dryrun_setframe = setframe;
+                emuenv.kernel.try_break_provable_evf_cycle(true);
+            }
+            if (stall_vblanks > PROVABLE_BREAK_VBLANKS && unpaused && renderer_idle_vblanks > PROVABLE_BREAK_VBLANKS && world_stop_quiet && last_provable_break_setframe != setframe) {
+#ifdef _WIN32
+                if (!IsDebuggerPresent())
+#endif
+                {
+                    const int broken = emuenv.kernel.try_break_provable_evf_cycle();
+                    if (broken > 0) {
+                        last_provable_break_setframe = setframe;
+                        LOG_ERROR("HANG WATCHDOG: provable-cycle breaker released {} dead event flag(s) after {} vblanks", broken, stall_vblanks);
+                    }
+                }
+            }
+
             // Deadlock breaker for stuck event flags
             constexpr uint64_t BREAK_STALL_VBLANKS = 300; // ~5s at 60Hz
             constexpr uint64_t BREAK_SLOW_VBLANKS = 900; // ~15s fallback when guest threads still wake
@@ -216,6 +248,13 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
                     // dump BEFORE mutating anything so the log always records what was stuck on what
                     LOG_ERROR("HANG WATCHDOG: no flip for {} vblanks, renderer idle {}, guest wake-idle {} — dumping guest threads, then breaking", stall_vblanks, renderer_idle_vblanks, guest_idle_vblanks);
                     emuenv.kernel.log_thread_hang_dump();
+#ifdef _WIN32
+                    // Debug speed makes a normal load look exactly like a wedge hang
+                    if (IsDebuggerPresent()) {
+                        LOG_ERROR("HANG WATCHDOG: breaker SUPPRESSED - debugger attached; heuristics must not mutate guest state under a human. Break in and inspect instead.");
+                        continue;
+                    }
+#endif
                     const int nudged = emuenv.kernel.try_break_frame_sync_deadlock(nudged_this_stall);
                     if (nudged > 0)
                         LOG_ERROR("HANG WATCHDOG: deadlock breaker nudged {} stuck event flag(s) after {} vblanks stalled", nudged, stall_vblanks);

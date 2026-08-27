@@ -907,6 +907,7 @@ static void display_entry_thread(EmuEnvState &emuenv) {
     }
 
     while (true) {
+        emuenv.gxm.display_worker_state.store(0, std::memory_order_relaxed);
         auto display_callback = display_queue.top();
         if (!display_callback)
             break;
@@ -929,17 +930,21 @@ static void display_entry_thread(EmuEnvState &emuenv) {
                         sync->timestamp_current.load(), sync->timestamp_ahead.load());
             }
         };
+        emuenv.gxm.display_worker_state.store(1, std::memory_order_relaxed);
         if (wait_sync(old_sync, display_callback->old_sync_timestamp, "old") == renderer::SyncWaitResult::Shutdown) {
             return;
         }
         if (old_sync != new_sync) {
+            emuenv.gxm.display_worker_state.store(2, std::memory_order_relaxed);
             if (wait_sync(new_sync, display_callback->new_sync_timestamp, "new") == renderer::SyncWaitResult::Shutdown) {
                 return;
             }
         }
+        emuenv.gxm.display_worker_state.store(3, std::memory_order_relaxed);
 
         // now we can remove the thread from the display queue
         display_queue.pop();
+        emuenv.gxm.display_entries_done.fetch_add(1, std::memory_order_relaxed);
 
         // check if we're shutting down before calling run_guest_function to avoid deadlock
         if (emuenv.display.abort.load()) {
