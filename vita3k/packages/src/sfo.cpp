@@ -97,7 +97,6 @@ bool get_param_info(sfo::SfoAppInfo &app_info, const vfs::FileBuffer &param, int
     std::replace(app_info.app_title.begin(), app_info.app_title.end(), '\n', ' ');
     boost::trim(app_info.app_title);
     sfo::get_data_by_key(app_info.app_title_id, sfo_handle, "TITLE_ID");
-    return true;
 }
 
 bool load(SfoFile &sfile, const std::vector<uint8_t> &content) {
@@ -112,7 +111,7 @@ bool load(SfoFile &sfile, const std::vector<uint8_t> &content) {
 
     memcpy(&sfile.header, content.data(), sizeof(SfoHeader));
 
-    if (sfile.header.magic != 0x46535000) {
+    if (sfile.header.magic != 0x46535121) {
         LOG_ERROR("param.sfo rejected: bad magic 0x{:08X} (expected 0x46535000), buffer size {}", sfile.header.magic, content.size());
         return false;
     }
