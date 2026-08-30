@@ -179,6 +179,13 @@ struct WorldStopScope {
 inline constexpr bool DEFER_IDENTICAL_REMAP = true;
 static Address deferred_unmap_addr = 0;
 
+static void note_memory_transition(renderer::State &renderer, const char *kind, Address addr, uint32_t size) {
+    renderer.last_mem_transition_epoch_ms.store(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(), std::memory_order_relaxed);
+    static uint64_t transitions = 0;
+    if (((++transitions) & 1023) == 1)
+        LOG_INFO("[MEMTRANS] transition #{}: {} 0x{:X} size 0x{:X}", transitions, kind, addr, size);
+}
+
 static void flush_deferred_unmap(renderer::State &renderer, MemState &mem, SceUID caller_thread) {
     if (!deferred_unmap_addr)
         return;
@@ -194,6 +201,8 @@ COMMAND(handle_memory_map) {
     const Ptr<void> addr = helper.pop<Ptr<void>>();
     const uint32_t size = helper.pop<uint32_t>();
     const SceUID caller_thread = static_cast<SceUID>(helper.pop<uint32_t>());
+
+    note_memory_transition(renderer, "map", addr.address(), size);
 
     if (DEFER_IDENTICAL_REMAP && renderer.current_backend == Backend::Vulkan && deferred_unmap_addr) {
         auto &vk = dynamic_cast<vulkan::VKState &>(renderer);
@@ -225,6 +234,8 @@ COMMAND(handle_memory_unmap) {
 
     const Ptr<void> addr = helper.pop<Ptr<void>>();
     const SceUID caller_thread = static_cast<SceUID>(helper.pop<uint32_t>());
+
+    note_memory_transition(renderer, "unmap", addr.address(), 0);
 
     if (DEFER_IDENTICAL_REMAP && renderer.current_backend == Backend::Vulkan
         && dynamic_cast<vulkan::VKState &>(renderer).mapped_memories.contains(addr.address())) {

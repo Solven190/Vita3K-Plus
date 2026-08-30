@@ -368,7 +368,7 @@ bool USSETranslatorVisitor::smp(
             return true;
         }
 
-        if (sb_mode != 0 || lod_mode != 2) {
+        if (sb_mode != 0) {
             LOG_ERROR("Unhandled load using texture buffer with sb mode {} and lod mode {}", sb_mode, lod_mode);
             return true;
         }
@@ -525,18 +525,26 @@ bool USSETranslatorVisitor::smp(
             std::vector<int> sampler_indices;
             std::vector<int> index_to_segment;
             constexpr int sa_count = 32 * 4;
-            // if dim is 2, do not look for cubes and if dim is 3, only look for cubes
-            const bool request_cube = dim == 3;
+            // the instruction dim is only the coord count the compiler allocated, so a 2D texture can still turn up in an SMP3d switch
+            spv::Id coords_2d = coords;
+            if (dim == 3)
+                coords_2d = m_b.createOp(spv::OpVectorShuffle, type_f32_v[2], { { true, coords }, { true, coords }, { false, 0 }, { false, 1 } });
             for (auto &smp : m_spirv_params.samplers) {
                 if (smp.first < sa_count)
                     continue;
 
-                if (request_cube != smp.second.is_cube)
+                if (dim == 2 && smp.second.is_cube)
                     continue;
 
                 samplers.push_back(&smp.second);
                 index_to_segment.push_back(sampler_indices.size());
                 sampler_indices.push_back(smp.first - sa_count);
+            }
+
+            if (samplers.empty()) {
+                LOG_ERROR("Texture buffer load with dim {} has no compatible sampler", dim);
+                store(inst.opr.dest, utils::make_uniform_vector_from_type(m_b, type_f32_v[4], 0.0f), 0b1111);
+                return true;
             }
 
             std::vector<spv::Block *> segment_blocks;
@@ -548,7 +556,8 @@ bool USSETranslatorVisitor::smp(
                 if (tb_dest_fmt[fconv_type] == DataType::UNK)
                     inst.opr.dest.type = smp->component_type;
 
-                spv::Id result = do_fetch_texture(m_b.createLoad(smp->id, spv::NoPrecision), smp->index, dim, { coords, static_cast<int>(DataType::F32) }, inst.opr.dest.type, lod_mode, extra1);
+                const int case_dim = smp->is_cube ? 3 : 2;
+                spv::Id result = do_fetch_texture(m_b.createLoad(smp->id, spv::NoPrecision), smp->index, case_dim, { smp->is_cube ? coords : coords_2d, static_cast<int>(DataType::F32) }, inst.opr.dest.type, lod_mode, extra1, extra2);
                 const Imm4 dest_mask = (1U << smp->component_count) - 1;
                 store(inst.opr.dest, result, dest_mask);
 

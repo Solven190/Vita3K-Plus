@@ -1307,6 +1307,7 @@ SceUID condvar_create(SceUID *uid_out, KernelState &kernel, const char *export_n
     }
 
     const CondvarPtr condvar = std::make_shared<Condvar>();
+    condvar->uid = uid;
     condvar->attr = attr;
     condvar->associated_mutex = std::move(assoc_mutex);
     strncpy(condvar->name, name, KERNELOBJECT_MAX_NAME_LENGTH);

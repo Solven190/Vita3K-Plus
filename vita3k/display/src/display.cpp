@@ -179,16 +179,33 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
             static uint64_t last_dumped_setframe = ~0ull;
             static uint64_t last_break_vblanks = 0;
             static uint64_t last_provable_break_setframe = ~0ull;
+            static uint64_t last_provable_dryrun_setframe = ~0ull;
             static uint64_t last_progress_value = 0;
             static uint64_t last_progress_change_vblank = 0;
             static std::vector<SceUID> nudged_this_stall;
-            const uint64_t setframe = emuenv.display.last_setframe_vblank_count.load();
-            const uint64_t vblanks = emuenv.display.vblank_count.load();
-            const bool unpaused = !emuenv.kernel.is_threads_paused();
-            const uint64_t stall_vblanks = (setframe > 0 && vblanks > setframe) ? (vblanks - setframe) : 0;
-
             static uint64_t last_wake_value = 0;
             static uint64_t last_wake_change_vblank = 0;
+            static bool never_flip_redumped = false;
+            static uint64_t last_seen_vblanks = 0;
+            const uint64_t setframe = emuenv.display.last_setframe_vblank_count.load();
+            const uint64_t vblanks = emuenv.display.vblank_count.load();
+            // vblank_count restarts at 0 each game session (DisplayState::deinit); these statics outlive it, so reset them with it
+            if (vblanks < last_seen_vblanks) {
+                last_dumped_setframe = ~0ull;
+                last_break_vblanks = 0;
+                last_provable_break_setframe = ~0ull;
+                last_provable_dryrun_setframe = ~0ull;
+                last_progress_value = 0;
+                last_progress_change_vblank = 0;
+                last_wake_value = 0;
+                last_wake_change_vblank = 0;
+                nudged_this_stall.clear();
+                never_flip_redumped = false;
+            }
+            last_seen_vblanks = vblanks;
+            const bool unpaused = !emuenv.kernel.is_threads_paused();
+            const bool never_flipped = (setframe == 0);
+            const uint64_t stall_vblanks = (vblanks > setframe) ? (vblanks - setframe) : 0;
             const uint64_t progress_now = emuenv.renderer ? emuenv.renderer->progress_counter.load(std::memory_order_relaxed) : 0;
             if (progress_now != last_progress_value) {
                 last_progress_value = progress_now;
@@ -202,10 +219,27 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
             const uint64_t renderer_idle_vblanks = vblanks - last_progress_change_vblank;
             const uint64_t guest_idle_vblanks = vblanks - last_wake_change_vblank;
 
+            if (unpaused && vblanks > 0 && (vblanks % 600) == 0)
+                LOG_INFO("[FLIPTRACE] vblank={} SetFrameBuf calls={} accepted={} queue: entries_done={} depth={} worker_state={} renderer_progress={}",
+                    vblanks, emuenv.display.setframe_call_count.load(), emuenv.display.setframe_accept_count.load(),
+                    emuenv.gxm.display_entries_done.load(), emuenv.gxm.display_queue.size(), emuenv.gxm.display_worker_state.load(),
+                    emuenv.renderer ? emuenv.renderer->progress_counter.load(std::memory_order_relaxed) : 0);
+
             // Full 10s dump for diagnostics (once per distinct stall).
             if (stall_vblanks > 600 && unpaused && last_dumped_setframe != setframe) {
                 last_dumped_setframe = setframe; // one dump per distinct stall
-                LOG_ERROR("HANG WATCHDOG: no framebuffer flip for {} vblanks (renderer idle {}, guest wake-idle {}) — dumping guest threads", stall_vblanks, renderer_idle_vblanks, guest_idle_vblanks);
+                LOG_ERROR("HANG WATCHDOG: no framebuffer flip for {} vblanks{} (renderer idle {}, guest wake-idle {}, SetFrameBuf calls={} accepted={}) — dumping guest threads",
+                    stall_vblanks, never_flipped ? " (game NEVER flipped since boot)" : "", renderer_idle_vblanks, guest_idle_vblanks,
+                    emuenv.display.setframe_call_count.load(), emuenv.display.setframe_accept_count.load());
+                emuenv.kernel.log_thread_hang_dump();
+                LOG_ERROR("HANG DISPLAY QUEUE: depth={} worker_state={} (0=idle-waiting-entry 1=wait-old-sync 2=wait-new-sync 3=running-callback) entries_done={}",
+                    emuenv.gxm.display_queue.size(), emuenv.gxm.display_worker_state.load(), emuenv.gxm.display_entries_done.load());
+                emuenv.kernel.log_eventflag_history();
+            }
+            if (never_flipped && stall_vblanks > 3600 && unpaused && !never_flip_redumped) {
+                never_flip_redumped = true;
+                LOG_ERROR("HANG WATCHDOG: STILL no first flip after {} vblanks (SetFrameBuf calls={}) — re-dumping for movement comparison",
+                    stall_vblanks, emuenv.display.setframe_call_count.load());
                 emuenv.kernel.log_thread_hang_dump();
                 LOG_ERROR("HANG DISPLAY QUEUE: depth={} worker_state={} (0=idle-waiting-entry 1=wait-old-sync 2=wait-new-sync 3=running-callback) entries_done={}",
                     emuenv.gxm.display_queue.size(), emuenv.gxm.display_worker_state.load(), emuenv.gxm.display_entries_done.load());
@@ -213,15 +247,17 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
             }
             // Cycle breaker
             constexpr uint64_t PROVABLE_DRYRUN_VBLANKS = 120;
-            constexpr uint64_t PROVABLE_BREAK_VBLANKS = 900;
-            static uint64_t last_provable_dryrun_setframe = ~0ull;
+            constexpr uint64_t PROVABLE_BREAK_VBLANKS = 3600;
             const int64_t now_epoch_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
             const bool world_stop_quiet = (now_epoch_ms - emuenv.kernel.last_world_stop_epoch_ms.load(std::memory_order_relaxed)) >= 5000;
-            if (stall_vblanks > PROVABLE_DRYRUN_VBLANKS && unpaused && renderer_idle_vblanks > PROVABLE_DRYRUN_VBLANKS && last_provable_dryrun_setframe != setframe) {
+            // deferred-unmap collapses remaps WITHOUT world-stops, blinding the veto above; transitions are stamped regardless
+            const bool mem_transition_quiet = !emuenv.renderer
+                || (now_epoch_ms - emuenv.renderer->last_mem_transition_epoch_ms.load(std::memory_order_relaxed)) >= 5000;
+            if (!never_flipped && stall_vblanks > PROVABLE_DRYRUN_VBLANKS && unpaused && renderer_idle_vblanks > PROVABLE_DRYRUN_VBLANKS && last_provable_dryrun_setframe != setframe) {
                 last_provable_dryrun_setframe = setframe;
                 emuenv.kernel.try_break_provable_evf_cycle(true);
             }
-            if (stall_vblanks > PROVABLE_BREAK_VBLANKS && unpaused && renderer_idle_vblanks > PROVABLE_BREAK_VBLANKS && world_stop_quiet && last_provable_break_setframe != setframe) {
+            if (!never_flipped && stall_vblanks > PROVABLE_BREAK_VBLANKS && unpaused && renderer_idle_vblanks > PROVABLE_BREAK_VBLANKS && world_stop_quiet && mem_transition_quiet && last_provable_break_setframe != setframe) {
 #ifdef _WIN32
                 if (!IsDebuggerPresent())
 #endif
@@ -237,7 +273,7 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
             // Deadlock breaker for stuck event flags
             constexpr uint64_t BREAK_STALL_VBLANKS = 300; // ~5s at 60Hz
             constexpr uint64_t BREAK_SLOW_VBLANKS = 900; // ~15s fallback when guest threads still wake
-            if (stall_vblanks > BREAK_STALL_VBLANKS && unpaused
+            if (!never_flipped && stall_vblanks > BREAK_STALL_VBLANKS && unpaused
                 && (last_break_vblanks == 0 || vblanks - last_break_vblanks > BREAK_STALL_VBLANKS)) {
                 last_break_vblanks = vblanks;
                 const bool full_wedge = renderer_idle_vblanks > BREAK_STALL_VBLANKS && guest_idle_vblanks > BREAK_STALL_VBLANKS;
@@ -441,6 +477,8 @@ void DisplayState::deinit() {
 
     vblank_count = 0;
     last_setframe_vblank_count = 0;
+    setframe_call_count = 0;
+    setframe_accept_count = 0;
 
     fps_hack = false;
     // pretty sure we set this on game boot

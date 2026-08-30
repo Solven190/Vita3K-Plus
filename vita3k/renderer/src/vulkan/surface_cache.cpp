@@ -100,6 +100,10 @@ static bool surface_sync_needs_f10_repack(const ColorSurfaceCacheInfo &surface) 
     return surface.format == SCE_GXM_COLOR_BASE_FORMAT_U2F10F10F10 && surface.texture.format == vk::Format::eR16G16B16A16Sfloat;
 }
 
+static bool surface_sync_needs_se5_repack(const ColorSurfaceCacheInfo &surface) {
+    return surface.format == SCE_GXM_COLOR_BASE_FORMAT_SE5M9M9M9 && surface.texture.format == vk::Format::eR16G16B16A16Sfloat;
+}
+
 // F16 (s1e5m10) -> unsigned F10 (e5m5)
 static inline uint32_t half_to_f10(uint32_t h) {
     // branchless: subtracting the sign bit yields an all-ones mask for positives, 0 for negatives
@@ -113,6 +117,60 @@ static inline uint32_t half_to_unorm2(uint32_t h) {
     return (h >= 0x3AAB) ? 3 : (h >= 0x3800) ? 2
         : (h >= 0x3155)                      ? 1
                                              : 0;
+}
+
+static inline float half_to_float_unsigned(uint32_t h) {
+    if (h & 0x8000)
+        return 0.0f;
+    const uint32_t exp = (h >> 10) & 0x1F;
+    const uint32_t man = h & 0x3FF;
+    if (exp == 31)
+        return man ? 0.0f : 65504.0f;
+    if (exp == 0)
+        return static_cast<float>(man) * (1.0f / (1 << 24));
+    const uint32_t f32 = ((exp + 112) << 23) | (man << 13);
+    float result;
+    memcpy(&result, &f32, sizeof(result));
+    return result;
+}
+
+static inline uint32_t pack_rgb9e5(float r, float g, float b) {
+    constexpr float max_rgb9e5 = 65408.0f;
+    r = std::min(r, max_rgb9e5);
+    g = std::min(g, max_rgb9e5);
+    b = std::min(b, max_rgb9e5);
+    const float maxc = std::max(r, std::max(g, b));
+    if (maxc <= 0.0f)
+        return 0;
+    uint32_t max_bits;
+    memcpy(&max_bits, &maxc, sizeof(max_bits));
+    int exp_shared = std::max(-16, static_cast<int>(max_bits >> 23) - 127) + 1 + 15;
+    // scale = 2^(exp_shared - 15 - 9), always a normal float here (exp_shared is in [0, 31])
+    uint32_t scale_bits = static_cast<uint32_t>(exp_shared - 24 + 127) << 23;
+    float scale;
+    memcpy(&scale, &scale_bits, sizeof(scale));
+    if (static_cast<uint32_t>(maxc / scale + 0.5f) == 512) {
+        exp_shared += 1;
+        scale *= 2.0f;
+    }
+    const uint32_t rs = std::min(511u, static_cast<uint32_t>(r / scale + 0.5f));
+    const uint32_t gs = std::min(511u, static_cast<uint32_t>(g / scale + 0.5f));
+    const uint32_t bs = std::min(511u, static_cast<uint32_t>(b / scale + 0.5f));
+    return rs | (gs << 9) | (bs << 18) | (static_cast<uint32_t>(exp_shared) << 27);
+}
+
+static void pack_rgba16f_to_se5m9m9m9(uint8_t *dst, const uint8_t *src, uint32_t pixel_stride, uint32_t height) {
+    const uint32_t count = pixel_stride * height;
+    uint32_t *dst_px = reinterpret_cast<uint32_t *>(dst);
+    const uint64_t *src_px = reinterpret_cast<const uint64_t *>(src);
+
+    for (uint32_t i = 0; i < count; i++) {
+        const uint64_t v = src_px[i];
+        const float r = half_to_float_unsigned(static_cast<uint32_t>(v) & 0xFFFF);
+        const float g = half_to_float_unsigned(static_cast<uint32_t>(v >> 16) & 0xFFFF);
+        const float b = half_to_float_unsigned(static_cast<uint32_t>(v >> 32) & 0xFFFF);
+        dst_px[i] = pack_rgb9e5(r, g, b);
+    }
 }
 
 static void pack_rgba16f_to_u2f10f10f10(uint8_t *dst, const uint8_t *src, uint32_t pixel_stride, uint32_t height) {
@@ -410,8 +468,9 @@ bool VKSurfaceCache::try_upload_guest_content(ColorSurfaceCacheInfo &info, MemSt
     const bool upload_supported = state.features.enable_memory_mapping
         && info.tiling == SurfaceTiling::Linear
         && format_support_surface_sync(info.format)
-        // guest U2F10F10F10 -> RGBA16F upload conversion is not implemented (sync is one-way)
+        // guest U2F10F10F10/SE5M9M9M9 -> RGBA16F upload conversion is not implemented (sync is one-way)
         && info.format != SCE_GXM_COLOR_BASE_FORMAT_U2F10F10F10
+        && info.format != SCE_GXM_COLOR_BASE_FORMAT_SE5M9M9M9
         && info.swizzle.r == vk::ComponentSwizzle::eR
         && !info.raw_image
         && vk::blockSize(info.texture.format) > 0
@@ -2172,7 +2231,7 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
         return nullptr;
 
     // repack-format surfaces (CPU-converted writeback) sync at most once per 25ms
-    if (surface_sync_needs_f10_repack(*last_written_surface)) {
+    if (surface_sync_needs_f10_repack(*last_written_surface) || surface_sync_needs_se5_repack(*last_written_surface)) {
         const auto now = std::chrono::steady_clock::now();
         if (now - last_written_surface->last_repack_sync_time < std::chrono::milliseconds(25)) {
             f10_skip_count.fetch_add(1, std::memory_order_relaxed);
@@ -2213,7 +2272,7 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
     }
 
     const uint32_t pixel_stride = (last_written_surface->stride_bytes * 8) / gxm::bits_per_pixel(last_written_surface->format);
-    const bool needs_copy_buffer = format_need_additional_memory(last_written_surface->format) || surface_sync_needs_u4u4u4u4_repack(*last_written_surface) || surface_sync_needs_f10_repack(*last_written_surface);
+    const bool needs_copy_buffer = format_need_additional_memory(last_written_surface->format) || surface_sync_needs_u4u4u4u4_repack(*last_written_surface) || surface_sync_needs_f10_repack(*last_written_surface) || surface_sync_needs_se5_repack(*last_written_surface);
 
     // For macrotile-sync surfaces at non-integer scale factors, clamp the sync
     // to only the rendered macroblocks.
@@ -2474,6 +2533,11 @@ void VKSurfaceCache::perform_post_surface_sync(const MemState &mem, ColorSurface
         pack_rgba16f_to_u2f10f10f10(pixels, static_cast<const uint8_t *>(surface->copy_buffer->mapped_data), pixel_stride, surface->original_height);
         f10_repack_us.fetch_add(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count(), std::memory_order_relaxed);
 
+        return;
+    }
+
+    if (surface_sync_needs_se5_repack(*surface)) {
+        pack_rgba16f_to_se5m9m9m9(pixels, static_cast<const uint8_t *>(surface->copy_buffer->mapped_data), pixel_stride, surface->original_height);
         return;
     }
 

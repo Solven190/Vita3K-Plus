@@ -6,7 +6,7 @@ set(VITA3K_APP_VER_HI 1)
 set(VITA3K_APP_VER_MID 1)
 set(VITA3K_APP_VER_LO 0)
 # two-component display version (v1.1): the numeric LO still feeds the exe FILE_VERSION resource  // Nick - Version
-set(VITA3K_APP_VERSION "v${VITA3K_APP_VER_HI}.${VITA3K_APP_VER_MID} RC1")
+set(VITA3K_APP_VERSION "v${VITA3K_APP_VER_HI}.${VITA3K_APP_VER_MID} RC2")
 # Release number advertised to the updater (must match "Vita3K Build: <n>" in the GitHub release body) and rise each release
 set(VITA3K_APP_NUMBER 1)
 
@@ -104,7 +104,7 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 if(NOT MSVC)
-	add_compile_options(-Wformat -Werror=format-security)
+	add_compile_options(-Wformat -Werror=format-security -Werror=return-type)
 endif()
 
 if(NOT ANDROID)

@@ -667,8 +667,8 @@ void VKContext::stop_recording(const SceGxmNotification &notif1, const SceGxmNot
             }
         }
 
-        // U2F10F10F10 guest write-back is throttled so run it after the notifications
-        const bool post_sync_after_notifications = surface_info && surface_info->need_post_surface_sync && surface_info->format == SCE_GXM_COLOR_BASE_FORMAT_U2F10F10F10;
+        // U2F10F10F10/SE5M9M9M9 guest write-back is throttled so run it after the notifications
+        const bool post_sync_after_notifications = surface_info && surface_info->need_post_surface_sync && (surface_info->format == SCE_GXM_COLOR_BASE_FORMAT_U2F10F10F10 || surface_info->format == SCE_GXM_COLOR_BASE_FORMAT_SE5M9M9M9);
 
         if (surface_info && surface_info->need_post_surface_sync && !post_sync_after_notifications) {
             state.request_queue.push(PostSurfaceSyncRequest{ surface_info });

@@ -852,13 +852,16 @@ std::string ThreadState::log_stack_traceback() const {
     constexpr Address END_OFFSET = 1024;
     std::string str;
     const Address sp = read_sp(*cpu);
+    // A thread whose sp is near null (i.e. never started, or a non-guest/host thread) has no walkable stack
+    if (sp < 0x1000)
+        return str;
     for (Address addr = sp - START_OFFSET; addr <= sp + END_OFFSET; addr += 4) {
-        if (Ptr<uint32_t>(addr).valid(mem)) {
-            const Address value = *Ptr<uint32_t>(addr).get(mem);
-            const auto mod = kernel.find_module_by_addr(value);
-            if (mod)
-                fmt::format_to(std::back_inserter(str), "0x{:X} (module: {})\n", value, mod->module_name);
-        }
+        uint32_t value;
+        if (!debug_safe_copy_guest(mem, addr, &value, sizeof(value)))
+            continue;
+        const auto mod = kernel.find_module_by_addr(value);
+        if (mod)
+            fmt::format_to(std::back_inserter(str), "0x{:X} (module: {})\n", value, mod->module_name);
     }
     return str;
 }
