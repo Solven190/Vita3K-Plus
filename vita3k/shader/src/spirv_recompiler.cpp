@@ -1879,12 +1879,11 @@ static spv::Function *make_vert_finalize_function(spv::Builder &b, const SpirvSh
 
                 b.createStore(o_val2, out_var);
 
-                // Note: Depth range and user clip planes are ineffective in this mode
-                // However, that can't be directly translated, so we just gonna set it to w here
                 spv::Id z_ref = utils::create_access_chain(b, spv::StorageClassOutput, out_var, { b.makeIntConstant(2) });
                 spv::Id w_ref = utils::create_access_chain(b, spv::StorageClassOutput, out_var, { b.makeIntConstant(3) });
 
-                b.createStore(b.createLoad(w_ref, spv::NoPrecision), z_ref);
+                if (!translation_state.is_vulkan)
+                    b.createStore(b.createLoad(w_ref, spv::NoPrecision), z_ref);
 
                 cond_builder.makeBeginElse();
 
