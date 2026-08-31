@@ -21,7 +21,7 @@
 #include <util/system.h>
 
 #ifdef __ANDROID__
-#define VITA3K_DEFAULT_MEMORY_MAPPING "native-buffer"
+#define VITA3K_DEFAULT_MEMORY_MAPPING "page-table"
 #elif defined(_WIN32)
 #define VITA3K_DEFAULT_MEMORY_MAPPING "external-host"
 #else
