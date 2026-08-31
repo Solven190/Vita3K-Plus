@@ -8,8 +8,8 @@ https://github.com/nckstwrt/Vita3K-Plus/releases
 
 ## Enhancements
 
-# USE TURNIP DRIVERS IF ON SnapDragon/Adreno
-# IF YOU SEE ANY FREEZING TRY USING ACCURATE THREAD SCHEDULING SETTING IN THE GRAPHICS OPTIONS (DOA5+, Sonic, etc need it)
+## USE TURNIP DRIVERS IF ON SnapDragon/Adreno
+## IF YOU SEE ANY FREEZING TRY USING ACCURATE THREAD SCHEDULING SETTING IN THE GRAPHICS OPTIONS (DOA5+, Sonic, etc need it)
 
 # v1.1 (Not Yet Released)
 - **Dead Or Alive 5 Plus** - Working - On Android requires Adreno, Turnip and the new setting Thread Scheduling Accuracy On
