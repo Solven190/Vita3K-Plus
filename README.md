@@ -8,6 +8,9 @@ https://github.com/nckstwrt/Vita3K-Plus/releases
 
 ## Enhancements
 
+# USE TURNIP DRIVERS IF ON SnapDragon/Adreno
+# IF YOU SEE ANY FREEZING TRY USING ACCURATE THREAD SCHEDULING SETTING IN THE GRAPHICS OPTIONS (DOA5+, Sonic, etc need it)
+
 # v1.1 (Not Yet Released)
 - **Dead Or Alive 5 Plus** - Working - On Android requires Adreno, Turnip and the new setting Thread Scheduling Accuracy On
 - **Metal Gear Solid 3** - Freezes fixed/worked around. Blending graphics fixed. On-Screen Touchpad fixes.
@@ -16,14 +19,19 @@ https://github.com/nckstwrt/Vita3K-Plus/releases
 - **Killzone** - Fix for the crash occurring at level 5
 - **Neptunia Re;Birth1** - Fix for crash after selecting New Game and background images not showing
 - **Little Big Planet** - "Vignette" shading and background images fixed
-- **Ys: Memories of Celcetta** Graphics Fixed
-- **Ragnarok Odyssey ACE** Graphics Fixed
-- **Ninja Gaiden Sigma 2 Plus** Graphics Fixed
+- **Ys: Memories of Celcetta** - Graphics Fixed
+- **Ragnarok Odyssey ACE** - Graphics Fixed
+- **Ninja Gaiden Sigma 2 Plus** - Graphics Fixed
 - **ModNation: Racers Road Trip** - Regression Fixed
 - **RESOGUN** - Graphics issues now fixed
 - **Omega Labyrinth** - Loading fixed by nishinji
+- **Dynasty Warriors 8** - Fixed text/graphics clipping
+- **Samurai Warriors 3** - Use Accurate Thread Scheduling to workaround loading bugs
+- **Gundam Breaker 3** - Almost all fixed. Still issues with main character's graphics.
+- **SteamWorld Dig** - Loads and plays
+- **UPPERS** - Graphics Fixed
 - Defaults now to External Host for Windows and Native Buffer on Android. **Use these Memory Mapping options for the best compatibility**
-- Lots of memory and sound improvements
+- Lots of memory, timing and sound improvements
 - Thanks to Reyes for all his help testing!
 
 # v1.0
