@@ -1104,6 +1104,12 @@ void VKState::late_init(const Config &cfg, const std::string_view game_id, MemSt
         // we support the requested mapping method
         mapping_method = request_mapping;
 
+    // Qualcomm drivers don't like Native Buffer and Page Table so fall back to Double Buffer. Turnip is fine.
+    if (is_adreno_stock && (mapping_method == MappingMethod::PageTable || mapping_method == MappingMethod::NativeBuffer)) {
+        LOG_INFO("Stock Adreno driver: running {} as Double Buffer this session (the driver crashes on the host-visible device-local mapping it needs); the saved option is unchanged — load Turnip to use it.", mapping_string[static_cast<int>(mapping_method)]);
+        mapping_method = MappingMethod::DoubleBuffer;
+    }
+
     features.enable_memory_mapping = mapping_method != MappingMethod::Disabled;
 
 #ifdef __ANDROID__
