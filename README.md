@@ -6,10 +6,14 @@ A fork of Vita3K with additional game compatibility and rendering fixes. All cre
 
 https://github.com/nckstwrt/Vita3K-Plus/releases
 
-## Enhancements
+## Android notes
 
-## USE TURNIP DRIVERS IF ON SnapDragon/Adreno
-## IF YOU SEE ANY FREEZING TRY USING ACCURATE THREAD SCHEDULING SETTING IN THE GRAPHICS OPTIONS (DOA5+, Sonic, etc need it)
+> **Snapdragon / Adreno:** Use Turnip drivers for the best compatibility.
+
+> **Freezing or hangs:** Enable **Accurate Thread Scheduling** in Graphics settings.  
+> This is needed for games such as *Dead or Alive 5 Plus*, *Sonic*, *Samurai Warriors 3*, etc.
+
+## Enhancements
 
 # v1.1 (Not Yet Released)
 - **Dead Or Alive 5 Plus** - Working - On Android requires Adreno, Turnip and the new setting Thread Scheduling Accuracy On
