@@ -96,7 +96,7 @@ spv::Id finalize(spv::Builder &b, spv::Id first, spv::Id second, const Swizzle4 
                 }
 
                 if (!b.isScalar(access_base)) {
-                    ops.push_back(b.createOp(spv::OpVectorExtractDynamic, target_type, { access_base, b.makeIntConstant(access_offset) }));
+                    ops.push_back(extract_vector_component(b, target_type, access_base, b.makeIntConstant(access_offset)));
                 } else {
                     ops.push_back(access_base);
                 }
@@ -430,7 +430,7 @@ static spv::Function *make_pack_func(spv::Builder &b, const FeatureState &featur
 
     spv::Id output = b.makeUintConstant(0);
     for (int i = 0; i < comp_count; ++i) {
-        spv::Id comp = b.createBinOp(spv::OpVectorExtractDynamic, comp_type, extracted, b.makeIntConstant(i));
+        spv::Id comp = extract_vector_component(b, comp_type, extracted, b.makeIntConstant(i));
 
         if (is_signed)
             comp = b.createUnaryOp(spv::OpBitcast, type_ui32, comp);
@@ -1311,12 +1311,8 @@ spv::Id unpack(spv::Builder &b, SpirvUtilFunctions &utils, const FeatureState &f
         spv::Id extracted = target;
 
         if (!b.isScalar(target) && !b.isConstant(target)) {
-            std::vector<spv::Id> extract_ops;
-            extract_ops.push_back(target);
-            extract_ops.push_back(b.makeIntConstant(static_cast<int>(i)));
-
             if (target_comp_count > 1) {
-                extracted = b.createOp(spv::OpVectorExtractDynamic, type_f32, extract_ops);
+                extracted = extract_vector_component(b, type_f32, target, b.makeIntConstant(static_cast<int>(i)));
             }
         }
 
@@ -1442,20 +1438,20 @@ void store(spv::Builder &b, const SpirvShaderParameters &params, SpirvUtilFuncti
                     if (b.isScalar(source) || total_comp_source == 1) {
                         ops.push_back(source);
                     } else {
-                        ops.push_back(b.createOp(spv::OpVectorExtractDynamic, vec_comp_type, { source, b.makeIntConstant(std::min(source_value_taken_count++, (int)total_comp_source - 1)) }));
+                        ops.push_back(extract_vector_component(b, vec_comp_type, source, b.makeIntConstant(std::min(source_value_taken_count++, (int)total_comp_source - 1))));
                     }
                 } else {
                     if (elem == spv::NoResult) {
                         // Replace it
                         const int actual_offset_start_to_store = insert_offset + (i + nearest_swizz_on) / num_comp_in_float;
                         elem = b.createOp(spv::OpAccessChain, comp_type, { bank_base, b.makeIntConstant(actual_offset_start_to_store >> 2) });
-                        elem = b.createOp(spv::OpVectorExtractDynamic, b.makeFloatType(32), { b.createLoad(elem, spv::NoPrecision), b.makeIntConstant(actual_offset_start_to_store % 4) });
+                        elem = extract_vector_component(b, b.makeFloatType(32), b.createLoad(elem, spv::NoPrecision), b.makeIntConstant(actual_offset_start_to_store % 4));
 
                         // Extract to f16
                         elem = unpack_one(b, utils, features, elem, dest.type);
                     }
 
-                    ops.push_back(b.createOp(spv::OpVectorExtractDynamic, vec_comp_type, { elem, b.makeIntConstant(j) }));
+                    ops.push_back(extract_vector_component(b, vec_comp_type, elem, b.makeIntConstant(j)));
                 }
             }
 
@@ -1488,7 +1484,7 @@ void store(spv::Builder &b, const SpirvShaderParameters &params, SpirvUtilFuncti
     if (total_comp_source == 1) {
         insert_offset += nearest_swizz_on / get_packed_component_count(dest.type);
         elem = b.createOp(spv::OpAccessChain, comp_type, { bank_base, b.makeIntConstant(insert_offset >> 2) });
-        spv::Id inserted = b.createOp(spv::OpVectorInsertDynamic, bank_base_elem_type, { b.createLoad(elem, spv::NoPrecision), source, b.makeIntConstant(insert_offset % 4) });
+        spv::Id inserted = insert_vector_component(b, bank_base_elem_type, b.createLoad(elem, spv::NoPrecision), source, b.makeIntConstant(insert_offset % 4));
 
         b.createStore(inserted, elem);
         return;
@@ -1561,6 +1557,24 @@ spv::Id make_vector_or_scalar_type(spv::Builder &b, spv::Id component, int size)
         return component;
     }
     return b.makeVectorType(component, size);
+}
+
+spv::Id extract_vector_component(spv::Builder &b, spv::Id type, spv::Id vector, spv::Id index) {
+    if (!b.isScalar(vector) && b.isConstantScalar(index)) {
+        const unsigned comp = b.getConstantScalar(index);
+        if (comp < static_cast<unsigned>(b.getNumComponents(vector)))
+            return b.createCompositeExtract(vector, type, comp);
+    }
+    return b.createBinOp(spv::OpVectorExtractDynamic, type, vector, index);
+}
+
+spv::Id insert_vector_component(spv::Builder &b, spv::Id type, spv::Id vector, spv::Id component, spv::Id index) {
+    if (!b.isScalar(vector) && b.isConstantScalar(index)) {
+        const unsigned comp = b.getConstantScalar(index);
+        if (comp < static_cast<unsigned>(b.getNumComponents(vector)))
+            return b.createCompositeInsert(component, vector, type, comp);
+    }
+    return b.createTriOp(spv::OpVectorInsertDynamic, type, vector, component, index);
 }
 
 spv::Id unwrap_type(spv::Builder &b, spv::Id type) {

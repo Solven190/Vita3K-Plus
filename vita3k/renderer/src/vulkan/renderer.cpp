@@ -1112,6 +1112,8 @@ void VKState::late_init(const Config &cfg, const std::string_view game_id, MemSt
 
     features.enable_memory_mapping = mapping_method != MappingMethod::Disabled;
 
+    features.force_full_precision = cfg.force_full_precision;
+
 #ifdef __ANDROID__
     if (mapping_method == MappingMethod::NativeBuffer) {
         // dynamically load the symbols

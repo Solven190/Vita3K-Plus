@@ -1179,6 +1179,12 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
         .subpass = 0
     };
 
+    // The stock Adreno driver can SIGSEGV inside createGraphicsPipeline
+    // If the log ends on this line this exact vert/frag pair killed the driver's compiler
+    if (state.is_adreno_stock)
+        LOG_INFO("[PIPE] stock-Adreno: compiling pipeline vert={} frag={} ({})", hex_string(vertex_program.hash),
+            hex_string(fragment_program.hash), is_fragment_disabled ? "frag-disabled" : "frag-enabled");
+
     // vulkan.hpp THROWS on an error result here, so a driver refusing the pipeline used to take
     // the whole emulator down before the check below could run. Some drivers (notably Mesa/Turnip)
     // also report an internal shader-compiler rejection as ErrorOutOfHostMemory rather than a

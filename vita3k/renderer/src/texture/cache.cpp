@@ -86,6 +86,8 @@ static uint32_t safe_copy_guest_range(const MemState &mem, Address addr, uint8_t
         const uint32_t page_left = 0x1000u - (cur & 0xFFFu);
         const uint32_t remaining = size - off;
         const uint32_t chunk = remaining < page_left ? remaining : page_left;
+        if (!is_valid_addr_range(mem, cur, cur + chunk))
+            break;
         if (!seh_memcpy(dst + off, Ptr<const void>(cur).get(mem), chunk))
             break;
         off += chunk;
@@ -107,7 +109,9 @@ static uint64_t hash_guest_texture_bytes(const MemState &mem, Address addr, uint
         const uint32_t page_left = 0x1000u - (cur & 0xFFFu);
         const uint32_t remaining = size - off;
         const uint32_t chunk = remaining < page_left ? remaining : page_left;
-        if (!seh_xxh3_update(state, Ptr<const void>(cur).get(mem), chunk)) {
+        // Same crash-safety as safe_copy_guest_range: seh_xxh3_update only catches a fault on Windows, so
+        // validate each page before reading it (the guest memory can be freed mid-flight on any platform).
+        if (!is_valid_addr_range(mem, cur, cur + chunk) || !seh_xxh3_update(state, Ptr<const void>(cur).get(mem), chunk)) {
             LOG_WARN_ONCE("hash_guest_texture_bytes: fault reading guest texture 0x{:08X} at +0x{:X} (page-table buffer boundary / stale mapping) — hash truncated", addr, off);
             break;
         }
