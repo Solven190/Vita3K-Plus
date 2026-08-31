@@ -562,6 +562,7 @@ void ThreadState::run_loop() {
                 // breadcrumbs for the hang dump: free here, a global lock inside call_import
                 last_import_nid = nid;
                 last_import_lr = read_lr(*cpu);
+                push_import_ring(nid);
                 kernel.call_import(*cpu, nid, id);
                 clear_exclusive(*cpu);
             }
@@ -606,6 +607,7 @@ void ThreadState::run_loop() {
                     const uint32_t nid = *Ptr<uint32_t>(read_pc(*cpu) + 4).get(mem);
                     last_import_nid = nid;
                     last_import_lr = read_lr(*cpu);
+                    push_import_ring(nid);
                     kernel.call_import(*cpu, nid, id);
                     clear_exclusive(*cpu);
                 }

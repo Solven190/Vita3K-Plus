@@ -186,6 +186,10 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
             static uint64_t last_wake_value = 0;
             static uint64_t last_wake_change_vblank = 0;
             static bool never_flip_redumped = false;
+            static uint32_t last_pipes_value = ~0u;
+            static uint64_t last_pipes_change_vblank = 0;
+            static uint64_t last_stuck_scene_dump_vblank = 0;
+            static int stuck_scene_dumps = 0;
             static uint64_t last_seen_vblanks = 0;
             const uint64_t setframe = emuenv.display.last_setframe_vblank_count.load();
             const uint64_t vblanks = emuenv.display.vblank_count.load();
@@ -201,6 +205,10 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
                 last_wake_change_vblank = 0;
                 nudged_this_stall.clear();
                 never_flip_redumped = false;
+                last_pipes_value = ~0u;
+                last_pipes_change_vblank = 0;
+                last_stuck_scene_dump_vblank = 0;
+                stuck_scene_dumps = 0;
             }
             last_seen_vblanks = vblanks;
             const bool unpaused = !emuenv.kernel.is_threads_paused();
@@ -245,6 +253,35 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
                     emuenv.gxm.display_queue.size(), emuenv.gxm.display_worker_state.load(), emuenv.gxm.display_entries_done.load());
                 emuenv.kernel.log_eventflag_history();
             }
+            constexpr uint32_t STUCK_SCENE_MAX_PIPELINES = 32;
+            constexpr uint64_t STUCK_SCENE_FROZEN_VBLANKS = 720;
+            constexpr uint64_t STUCK_SCENE_REDUMP_VBLANKS = 600;
+            constexpr int STUCK_SCENE_MAX_DUMPS = 6;
+            const uint32_t pipes_now = emuenv.renderer ? emuenv.renderer->diag_pipelines_created() : ~0u;
+            const bool pipes_tracked = (pipes_now != ~0u);
+            if (pipes_now != last_pipes_value) {
+                last_pipes_value = pipes_now;
+                last_pipes_change_vblank = vblanks;
+                stuck_scene_dumps = 0;
+            }
+            const uint64_t pipes_frozen_vblanks = vblanks - last_pipes_change_vblank;
+            if (pipes_tracked && !never_flipped && unpaused
+                && pipes_now <= STUCK_SCENE_MAX_PIPELINES
+                && pipes_frozen_vblanks >= STUCK_SCENE_FROZEN_VBLANKS
+                && stuck_scene_dumps < STUCK_SCENE_MAX_DUMPS
+                && (stuck_scene_dumps == 0 || vblanks - last_stuck_scene_dump_vblank >= STUCK_SCENE_REDUMP_VBLANKS)) {
+                last_stuck_scene_dump_vblank = vblanks;
+                ++stuck_scene_dumps;
+                LOG_ERROR("STUCK-SCENE WATCHDOG (dump {}/{}): presenting ({} SetFrameBuf accepted, renderer still executing commands) but only {} pipeline(s) ever compiled, frozen for {} vblanks (~{}s) — wedged BEFORE scene render; dumping guest threads",
+                    stuck_scene_dumps, STUCK_SCENE_MAX_DUMPS, emuenv.display.setframe_accept_count.load(), pipes_now, pipes_frozen_vblanks, pipes_frozen_vblanks / 60);
+                emuenv.kernel.log_thread_hang_dump();
+                if (stuck_scene_dumps == 1) {
+                    LOG_ERROR("STUCK-SCENE DISPLAY QUEUE: depth={} worker_state={} (0=idle-waiting-entry 1=wait-old-sync 2=wait-new-sync 3=running-callback) entries_done={}",
+                        emuenv.gxm.display_queue.size(), emuenv.gxm.display_worker_state.load(), emuenv.gxm.display_entries_done.load());
+                    emuenv.kernel.log_eventflag_history();
+                }
+            }
+
             // Cycle breaker
             constexpr uint64_t PROVABLE_DRYRUN_VBLANKS = 120;
             constexpr uint64_t PROVABLE_BREAK_VBLANKS = 3600;

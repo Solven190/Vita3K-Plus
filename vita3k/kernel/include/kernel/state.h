@@ -110,6 +110,8 @@ struct KernelState {
     CodecEngineBlocks codec_blocks;
 
     bool accurate_thread_scheduling = false;
+    bool preempt_on_wake = false;
+    int preempt_on_wake_us = 1000;
 
     Ptr<const void> tls_address = Ptr<const void>(0);
     unsigned int tls_psize = 0;

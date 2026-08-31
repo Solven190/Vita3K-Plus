@@ -15,6 +15,8 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+#include <chrono>
+
 #include <io/device.h>
 #include <io/functions.h>
 #include <io/io.h>
@@ -389,10 +391,34 @@ SceUID open_file(IOState &io, const char *path, const int flags, const fs::path 
 
     FileStats f{ path, normalized_path, system_path, flags };
     const auto fd = io.next_fd++;
-    io.std_files.emplace(fd, f);
+    {
+        const std::lock_guard<std::mutex> lock(io.file_mutex);
+        io.std_files.emplace(fd, f);
+    }
 
     LOG_TRACE_IF(log_file_op, "{}: Opening file {} ({}), fd: {}", export_name, path, normalized_path, log_hex(fd));
     return fd;
+}
+
+static constexpr bool IODIAG_ENABLED = true;
+
+void iodiag_log_read_dst(const char *kind, SceUID fd, SceOff offset, SceSize nbyte, int result,
+    Address dst, const char *block, const char *thread) {
+    if (!IODIAG_ENABLED || nbyte < 4096)
+        return;
+    using namespace std::chrono;
+    static steady_clock::time_point burst_start{};
+    static uint32_t burst_count = 0;
+    const auto now = steady_clock::now();
+    if (now - burst_start >= seconds(5)) {
+        burst_start = now;
+        burst_count = 0;
+    }
+    if (burst_count >= 24)
+        return;
+    burst_count++;
+    LOG_INFO("[IODIAG] {} dst=0x{:08X}..0x{:08X} block='{}' fd={} off={} size={} -> {} thread='{}'",
+        kind, dst, dst + nbyte, block, log_hex(fd), offset, nbyte, result, thread);
 }
 
 int read_file_at(void *data, IOState &io, const SceUID fd, const SceSize size, const SceOff offset, const char *export_name) {
@@ -401,7 +427,9 @@ int read_file_at(void *data, IOState &io, const SceUID fd, const SceSize size, c
         return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
 
     if (!io.file_mutex.try_lock()) {
-        io.concurrent_positional_io.fetch_add(1, std::memory_order_relaxed);
+        const uint64_t contended = io.concurrent_positional_io.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (contended <= 8 || contended % 1000 == 0)
+            LOG_WARN("[IODIAG] concurrent positional IO on fd {} (contended {} times)", log_hex(fd), contended);
         io.file_mutex.lock();
     }
     const std::lock_guard<std::mutex> lock(io.file_mutex, std::adopt_lock);
@@ -420,6 +448,22 @@ int read_file_at(void *data, IOState &io, const SceUID fd, const SceSize size, c
 
     // put the shared position back exactly as we found it
     file->second.seek(previous, SCE_SEEK_SET);
+
+    if (IODIAG_ENABLED) {
+        using namespace std::chrono;
+        static steady_clock::time_point burst_start{};
+        static uint32_t burst_count = 0;
+        const auto now = steady_clock::now();
+        if (now - burst_start >= seconds(5)) {
+            burst_start = now;
+            burst_count = 0;
+        }
+        if (burst_count < 16) {
+            burst_count++;
+            LOG_INFO("[IODIAG] pread fd={} offset={} size={} -> {}{}", log_hex(fd), offset, size,
+                read, (read != size) ? "  SHORT READ" : "");
+        }
+    }
     return static_cast<int>(read);
 }
 
@@ -451,6 +495,8 @@ int read_file(void *data, IOState &io, const SceUID fd, const SceSize size, cons
     assert(data != nullptr);
     assert(size >= 0);
 
+    const std::lock_guard<std::mutex> lock(io.file_mutex);
+
     const auto file = io.std_files.find(fd);
     if (file != io.std_files.end()) {
         const auto read = file->second.read(data, 1, size);
@@ -474,6 +520,8 @@ int read_file(void *data, IOState &io, const SceUID fd, const SceSize size, cons
 int write_file(SceUID fd, const void *data, const SceSize size, const IOState &io, const char *export_name) {
     assert(data != nullptr);
     assert(size >= 0);
+
+    const std::lock_guard<std::mutex> lock(io.file_mutex);
 
     if (fd < 0) {
         LOG_WARN("Error writing fd: {}, size: {}", log_hex(fd), size);
@@ -537,6 +585,8 @@ SceOff seek_file(const SceUID fd, const SceOff offset, const SceIoSeekMode whenc
     if (fd < 0)
         return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
 
+    const std::lock_guard<std::mutex> lock(io.file_mutex);
+
     const auto file = io.std_files.find(fd);
     if (file == io.std_files.end())
         return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
@@ -560,6 +610,8 @@ SceOff seek_file(const SceUID fd, const SceOff offset, const SceIoSeekMode whenc
 SceOff tell_file(IOState &io, const SceUID fd, const char *export_name) {
     if (fd < 0)
         return IO_ERROR(SCE_ERROR_ERRNO_EMFILE);
+
+    const std::lock_guard<std::mutex> lock(io.file_mutex);
 
     const auto std_file = io.std_files.find(fd);
 
@@ -681,6 +733,8 @@ int stat_file_by_fd(IOState &io, const SceUID fd, SceIoStat *statp, const fs::pa
 int close_file(IOState &io, const SceUID fd, const char *export_name) {
     if (fd < 0)
         return IO_ERROR(SCE_ERROR_ERRNO_EMFILE);
+
+    const std::lock_guard<std::mutex> lock(io.file_mutex);
 
     LOG_TRACE_IF(log_file_op, "{}: Closing file fd: {}", export_name, log_hex(fd));
 

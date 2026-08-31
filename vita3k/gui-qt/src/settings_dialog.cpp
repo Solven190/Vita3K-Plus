@@ -622,6 +622,8 @@ void SettingsDialog::build_desired_config(Config &desired) const {
     current.disable_surface_sync = m_ui->disable_surface_sync->isChecked();
     current.async_pipeline_compilation = m_ui->async_pipeline_compilation->isChecked();
     current.accurate_thread_scheduling = m_ui->accurate_thread_scheduling->isChecked();
+    current.preempt_on_wake = current.accurate_thread_scheduling;
+    current.preempt_on_wake_us = 1000;
     current.memory_mapping = m_ui->memory_mapping_box->currentData().toString().toStdString();
     current.screen_filter = m_ui->screen_filter_box->currentText().toStdString();
     current.resolution_multiplier = static_cast<float>(m_ui->resolution_upscale->value()) / 4.0f;

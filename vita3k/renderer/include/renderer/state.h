@@ -223,6 +223,9 @@ struct State {
 
     virtual void precompile_shader(const ShadersHash &hash) = 0;
     virtual void preclose_action() = 0;
+    virtual void wait_gpu_idle() {}
+
+    virtual uint32_t diag_pipelines_created() const { return ~0u; }
 
     virtual ~State() = default;
 

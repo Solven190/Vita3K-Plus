@@ -31,6 +31,9 @@
 #include <algorithm>
 #include <cstring>
 #include <numeric>
+#ifdef _WIN32
+#include <excpt.h> // EXCEPTION_EXECUTE_HANDLER for the SEH-guarded texture reads
+#endif
 #if defined(__x86_64__) && !defined(__APPLE__)
 #include <xxh_x86dispatch.h>
 #else
@@ -46,6 +49,71 @@ static constexpr bool protect_only_is_sufficient = true;
 
 static uint64_t hash_data(const void *data, size_t size) {
     return XXH3_64bits(data, size);
+}
+
+static bool seh_xxh3_update(XXH3_state_t *state, const void *p, uint32_t n) {
+#ifdef _WIN32
+    __try {
+        XXH3_64bits_update(state, p, n);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+#else
+    XXH3_64bits_update(state, p, n);
+    return true;
+#endif
+}
+
+static bool seh_memcpy(void *dst, const void *src, uint32_t n) {
+#ifdef _WIN32
+    __try {
+        memcpy(dst, src, n);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+#else
+    memcpy(dst, src, n);
+    return true;
+#endif
+}
+
+static uint32_t safe_copy_guest_range(const MemState &mem, Address addr, uint8_t *dst, uint32_t size) {
+    uint32_t off = 0;
+    while (off < size) {
+        const Address cur = addr + off;
+        const uint32_t page_left = 0x1000u - (cur & 0xFFFu);
+        const uint32_t remaining = size - off;
+        const uint32_t chunk = remaining < page_left ? remaining : page_left;
+        if (!seh_memcpy(dst + off, Ptr<const void>(cur).get(mem), chunk))
+            break;
+        off += chunk;
+    }
+    return off;
+}
+
+static uint64_t hash_guest_texture_bytes(const MemState &mem, Address addr, uint32_t size) {
+    if (!addr || size == 0)
+        return 0;
+    if (!mem.use_page_table)
+        return XXH3_64bits(Ptr<const void>(addr).get(mem), size);
+
+    static thread_local XXH3_state_t *state = XXH3_createState();
+    XXH3_64bits_reset(state);
+    uint32_t off = 0;
+    while (off < size) {
+        const Address cur = addr + off;
+        const uint32_t page_left = 0x1000u - (cur & 0xFFFu);
+        const uint32_t remaining = size - off;
+        const uint32_t chunk = remaining < page_left ? remaining : page_left;
+        if (!seh_xxh3_update(state, Ptr<const void>(cur).get(mem), chunk)) {
+            LOG_WARN_ONCE("hash_guest_texture_bytes: fault reading guest texture 0x{:08X} at +0x{:X} (page-table buffer boundary / stale mapping) — hash truncated", addr, off);
+            break;
+        }
+        off += chunk;
+    }
+    return XXH3_64bits_digest(state);
 }
 
 static uint64_t hash_palette_data(const SceGxmTexture &texture, size_t count, const MemState &mem) {
@@ -66,7 +134,7 @@ uint64_t hash_texture_data(const SceGxmTexture &texture, uint32_t texture_size, 
     }
 
     if (data.address()) {
-        data_hash = hash_data(data.get(mem), texture_size);
+        data_hash = hash_guest_texture_bytes(mem, data.address(), texture_size);
     }
 
     switch (base_format) {
@@ -173,6 +241,34 @@ static void hash_unaligned_tiled(const uint8_t *data, uint32_t width, uint32_t h
     }
 }
 
+static bool seh_hash_unaligned_tiled(const uint8_t *data, uint32_t width, uint32_t height, uint32_t block_width, uint32_t block_height, uint32_t bpp, XXH3_state_t *hash_state) {
+#ifdef _WIN32
+    __try {
+        hash_unaligned_tiled(data, width, height, block_width, block_height, bpp, hash_state);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+#else
+    hash_unaligned_tiled(data, width, height, block_width, block_height, bpp, hash_state);
+    return true;
+#endif
+}
+
+static bool seh_hash_arbitrary_swizzled(const uint8_t *data, uint32_t width, uint32_t height, uint32_t texture_width, uint32_t texture_height, uint32_t texture_size, XXH3_state_t *hash_state) {
+#ifdef _WIN32
+    __try {
+        hash_arbitrary_swizzled(data, width, height, texture_width, texture_height, texture_size, hash_state);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+#else
+    hash_arbitrary_swizzled(data, width, height, texture_width, texture_height, texture_size, hash_state);
+    return true;
+#endif
+}
+
 uint64_t hash_texture_nostride(const SceGxmTexture &texture, const MemState &mem) {
     const SceGxmTextureFormat format = gxm::get_format(texture);
     const SceGxmTextureBaseFormat base_format = gxm::get_base_format(format);
@@ -212,7 +308,7 @@ uint64_t hash_texture_nostride(const SceGxmTexture &texture, const MemState &mem
 
     // special case
     if (gxm::is_yuv_format(base_format)) {
-        hash ^= hash_data(data.get(mem), gxm::texture_size_first_mip(texture));
+        hash ^= hash_guest_texture_bytes(mem, data.address(), gxm::texture_size_first_mip(texture));
         return hash;
     }
 
@@ -249,7 +345,7 @@ uint64_t hash_texture_nostride(const SceGxmTexture &texture, const MemState &mem
         // perform the computation with 64-bit integers for safety
         // I checked, width * height * bpp will always fit in a 32-bit unsigned integer
         uint32_t texture_size = (width * height * bpp) / 8;
-        hash ^= hash_data(data.get(mem), texture_size);
+        hash ^= hash_guest_texture_bytes(mem, data.address(), texture_size);
         return hash;
     }
 
@@ -263,10 +359,12 @@ uint64_t hash_texture_nostride(const SceGxmTexture &texture, const MemState &mem
         uint32_t block_stride_in_bytes = (stride_in_pixels * block_height * bpp) / 8;
         uint32_t block_width_in_bytes = (width * block_height * bpp) / 8;
         uint32_t nb_blocks_y = height / block_height;
-        const uint8_t *data_loc = data.get(mem);
         for (uint32_t block_y = 0; block_y < nb_blocks_y; block_y++) {
-            XXH3_64bits_update(hash_state, data_loc, block_width_in_bytes);
-            data_loc += block_stride_in_bytes;
+            const void *row = Ptr<const void>(data.address() + block_y * block_stride_in_bytes).get(mem);
+            if (!seh_xxh3_update(hash_state, row, block_width_in_bytes)) {
+                LOG_WARN_ONCE("texture hash (strided): fault reading guest 0x{:08X} row {} (page-table) — hash truncated", data.address(), block_y);
+                break;
+            }
         }
 
         hash ^= XXH3_64bits_digest(hash_state);
@@ -275,7 +373,8 @@ uint64_t hash_texture_nostride(const SceGxmTexture &texture, const MemState &mem
 
     if (texture.texture_type() == SCE_GXM_TEXTURE_TILED) {
         // some side tiles have non-used pixels
-        hash_unaligned_tiled(data.get(mem), width, height, block_width, block_height, bpp, hash_state);
+        if (!seh_hash_unaligned_tiled(data.get(mem), width, height, block_width, block_height, bpp, hash_state))
+            LOG_WARN_ONCE("texture hash (tiled): fault reading guest 0x{:08X} (page-table) — hash truncated", data.address());
 
         hash ^= XXH3_64bits_digest(hash_state);
         return hash;
@@ -286,7 +385,8 @@ uint64_t hash_texture_nostride(const SceGxmTexture &texture, const MemState &mem
     const uint32_t texture_width = next_power_of_two(width);
     const uint32_t texture_height = next_power_of_two(height);
     const uint32_t texture_size = (texture_width * texture_height * bpp) / 8;
-    hash_arbitrary_swizzled(data.get(mem), width, height, texture_width, texture_height, texture_size, hash_state);
+    if (!seh_hash_arbitrary_swizzled(data.get(mem), width, height, texture_width, texture_height, texture_size, hash_state))
+        LOG_WARN_ONCE("texture hash (swizzled): fault reading guest 0x{:08X} (page-table) — hash truncated", data.address());
     hash ^= XXH3_64bits_digest(hash_state);
     return hash;
 }
@@ -351,6 +451,25 @@ void TextureCache::upload_texture(const SceGxmTexture &gxm_texture, MemState &me
     if (!texture_data) {
         LOG_ERROR_ONCE("Texture data at 0x{:X} is not mapped ({}x{} format 0x{:X}) - keeping the previous texture content", gxm_texture.data_addr << 2, width, height, fmt::underlying(fmt));
         return;
+    }
+
+    static thread_local std::vector<uint8_t> texture_staging;
+    if (mem.use_page_table) {
+        uint32_t total_size = gxm::texture_size(gxm_texture);
+        const auto tt = gxm_texture.texture_type();
+        if (tt == SCE_GXM_TEXTURE_CUBE || tt == SCE_GXM_TEXTURE_CUBE_ARBITRARY) {
+            const uint32_t face = gxm::texture_size_first_mip(gxm_texture);
+            const uint32_t safe_cube = 6u * (2u * face + 2048u); // 6 faces x (mip-chain slack + 2048 face align)
+            total_size = std::max(total_size, safe_cube);
+        }
+        if (total_size > 0) {
+            constexpr uint32_t staging_pad = 0x4000; // absorb minor decode overshoot past texture_size
+            texture_staging.assign(static_cast<size_t>(total_size) + staging_pad, 0);
+            const uint32_t copied = safe_copy_guest_range(mem, data.address(), texture_staging.data(), total_size);
+            if (copied < total_size)
+                LOG_WARN_ONCE("upload_texture: guest texture 0x{:08X} size 0x{:X}: only 0x{:X} bytes readable (page-table buffer boundary) — tail zero-filled", data.address(), total_size, copied);
+            texture_data = texture_staging.data();
+        }
     }
 
     std::vector<uint8_t> texture_data_decompressed;

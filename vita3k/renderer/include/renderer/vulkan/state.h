@@ -178,6 +178,8 @@ struct VKState : public renderer::State {
 
     void precompile_shader(const ShadersHash &hash) override;
     void preclose_action() override;
+    void wait_gpu_idle() override;
+    uint32_t diag_pipelines_created() const override { return pipeline_cache.pipelines_created.load(std::memory_order_relaxed); }
 
     // dumps the resolved device/driver/feature configuration to the log, once, from late_init
     void log_gpu_configuration(const Config &cfg);

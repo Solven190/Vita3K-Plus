@@ -48,6 +48,8 @@ void copy_global_to_current(Config::CurrentConfig &current, const Config &cfg) {
     current.anisotropic_filtering = cfg.anisotropic_filtering;
     current.async_pipeline_compilation = cfg.async_pipeline_compilation;
     current.accurate_thread_scheduling = cfg.accurate_thread_scheduling;
+    current.preempt_on_wake = cfg.preempt_on_wake;
+    current.preempt_on_wake_us = cfg.preempt_on_wake_us;
     current.guest_cores = cfg.guest_cores;
     current.import_textures = cfg.import_textures;
     current.export_textures = cfg.export_textures;
@@ -95,6 +97,8 @@ void copy_current_to_global(Config &cfg, const Config::CurrentConfig &current) {
     cfg.anisotropic_filtering = current.anisotropic_filtering;
     cfg.async_pipeline_compilation = current.async_pipeline_compilation;
     cfg.accurate_thread_scheduling = current.accurate_thread_scheduling;
+    cfg.preempt_on_wake = current.preempt_on_wake;
+    cfg.preempt_on_wake_us = current.preempt_on_wake_us;
     cfg.guest_cores = current.guest_cores;
     cfg.import_textures = current.import_textures;
     cfg.export_textures = current.export_textures;
@@ -200,6 +204,8 @@ bool load_custom_config(Config::CurrentConfig &out, const fs::path &config_path,
         out.anisotropic_filtering = gpu.attribute("anisotropic-filtering").as_int();
         out.async_pipeline_compilation = gpu.attribute("async-pipeline-compilation").as_bool();
         out.accurate_thread_scheduling = gpu.attribute("accurate-thread-scheduling").as_bool();
+        out.preempt_on_wake = gpu.attribute("preempt-on-wake").as_bool();
+        out.preempt_on_wake_us = gpu.attribute("preempt-on-wake-us").as_int(1000);
         out.guest_cores = gpu.attribute("guest-cores").as_int(1);
         out.import_textures = gpu.attribute("import-textures").as_bool();
         out.export_textures = gpu.attribute("export-textures").as_bool();
@@ -290,6 +296,8 @@ bool save_custom_config(const Config::CurrentConfig &cc, const fs::path &config_
     gpu_child.append_attribute("anisotropic-filtering") = cc.anisotropic_filtering;
     gpu_child.append_attribute("async-pipeline-compilation") = cc.async_pipeline_compilation;
     gpu_child.append_attribute("accurate-thread-scheduling") = cc.accurate_thread_scheduling;
+    gpu_child.append_attribute("preempt-on-wake") = cc.preempt_on_wake;
+    gpu_child.append_attribute("preempt-on-wake-us") = cc.preempt_on_wake_us;
     gpu_child.append_attribute("guest-cores") = cc.guest_cores;
     gpu_child.append_attribute("import-textures") = cc.import_textures;
     gpu_child.append_attribute("export-textures") = cc.export_textures;

@@ -148,7 +148,11 @@ EXPORT(SceSSize, _sceIoPread, SceUID fd, void *buf, SceSize nbyte, SceOff offset
                 thread ? thread->log_stack_traceback() : std::string("?"));
         }
     }
-    return read_file_at(buf, emuenv.io, fd, nbyte, offset, export_name);
+    const int pread_result = read_file_at(buf, emuenv.io, fd, nbyte, offset, export_name);
+    iodiag_log_read_dst("pread", fd, offset, nbyte, pread_result, host_to_guest(emuenv.mem, buf),
+        mem_name(host_to_guest(emuenv.mem, buf), emuenv.mem),
+        [&]() { const ThreadStatePtr t = emuenv.kernel.get_thread(thread_id); return t ? t->name.c_str() : "?"; }());
+    return pread_result;
 }
 
 EXPORT(int, _sceIoPreadAsync) {
@@ -298,7 +302,11 @@ EXPORT(int, sceIoRead, const SceUID fd, void *data, const SceSize size) {
         guest_sched_release_for_block();
         std::this_thread::sleep_for(std::chrono::microseconds(delay_us));
     }
-    return read_file(data, emuenv.io, fd, size, export_name);
+    const int diag_result = read_file(data, emuenv.io, fd, size, export_name);
+    iodiag_log_read_dst("read", fd, -1, size, diag_result, host_to_guest(emuenv.mem, data),
+        mem_name(host_to_guest(emuenv.mem, data), emuenv.mem),
+        [&]() { const ThreadStatePtr t = emuenv.kernel.get_thread(thread_id); return t ? t->name.c_str() : "?"; }());
+    return diag_result;
 }
 
 EXPORT(int, sceIoReadAsync) {

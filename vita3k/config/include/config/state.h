@@ -81,6 +81,8 @@ struct Config {
         int anisotropic_filtering = 1;
         bool async_pipeline_compilation = false;
         bool accurate_thread_scheduling = false;
+        bool preempt_on_wake = false;
+        int preempt_on_wake_us = 1000;
         int guest_cores = 1;
         bool import_textures = false;
         bool export_textures = false;

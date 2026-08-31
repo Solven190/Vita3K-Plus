@@ -130,6 +130,17 @@ struct Mutex : SyncPrimitive {
     WaitingThreadQueuePtr waiting_threads;
     Ptr<SceKernelLwMutexWork> workarea;
     std::atomic<bool> deleted{ false };
+    struct TraceEvent {
+        const char *ev = nullptr;
+        SceUID thread = 0;
+        SceUID owner = 0;
+        int lock_count = 0;
+        int waiters = 0;
+    };
+    static constexpr int TRACE_RING = 32;
+    std::atomic<bool> trace{ false };
+    TraceEvent trace_ring[TRACE_RING];
+    uint32_t trace_pos = 0;
 };
 
 typedef std::shared_ptr<Mutex> MutexPtr;

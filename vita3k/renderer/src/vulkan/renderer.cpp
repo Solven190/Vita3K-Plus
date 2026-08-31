@@ -373,6 +373,11 @@ bool create(std::unique_ptr<renderer::State> &state, const Config &config) {
     return vk_state.create(state, config);
 }
 
+static std::atomic<int64_t> g_last_device_destroy_ms{ 0 };
+static int64_t steady_now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
 VKState::VKState(int gpu_idx)
     : gpu_idx(gpu_idx)
     , surface_cache(*this)
@@ -388,6 +393,18 @@ bool VKState::init() {
 }
 
 bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &config) {
+    {
+        const int64_t last_destroy = g_last_device_destroy_ms.load(std::memory_order_relaxed);
+        if (last_destroy != 0) {
+            constexpr int64_t SETTLE_MS = 4000;
+            const int64_t since = steady_now_ms() - last_destroy;
+            if (since >= 0 && since < SETTLE_MS) {
+                const int64_t wait_ms = SETTLE_MS - since;
+                LOG_INFO("Waiting {}ms for the previous Vulkan device's memory to finish releasing before recreating (previous device destroyed {}ms ago) — avoids a driver device-loss on very fast game restarts", wait_ms, since);
+                std::this_thread::sleep_for(std::chrono::milliseconds(wait_ms));
+            }
+        }
+    }
 #ifdef __ANDROID__
     const bool custom_driver_requested = !config.current_config.custom_driver_name.empty();
 #endif
@@ -1280,6 +1297,7 @@ void VKState::cleanup() {
     vkutil::deinit();
 
     device.destroy();
+    g_last_device_destroy_ms.store(steady_now_ms(), std::memory_order_relaxed);
 
     if (debug_messenger) {
         instance.destroyDebugUtilsMessengerEXT(debug_messenger);
@@ -2250,6 +2268,16 @@ void VKState::preclose_action() {
         return;
 
     pipeline_cache.save_pipeline_cache();
+}
+
+void VKState::wait_gpu_idle() {
+    if (!device)
+        return;
+    try {
+        device.waitIdle();
+    } catch (const vk::SystemError &e) {
+        LOG_WARN("wait_gpu_idle: device.waitIdle() failed ({}) — device may already be lost; continuing teardown", e.what());
+    }
 }
 
 #ifdef __ANDROID__

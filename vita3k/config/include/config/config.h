@@ -168,6 +168,8 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(bool, "texture-cache", true, texture_cache)                                                    \
     code(bool, "async-pipeline-compilation", false, async_pipeline_compilation)                          \
     code(bool, "accurate-thread-scheduling", false, accurate_thread_scheduling)                         \
+    code(bool, "preempt-on-wake", false, preempt_on_wake)                                               \
+    code(int, "preempt-on-wake-us", 1000, preempt_on_wake_us)                                             \
     code(int, "guest-cores", 1, guest_cores)                                                            \
     code(bool, "show-compile-shaders", true, show_compile_shaders)                                      \
     code(bool, "hashless-texture-cache", false, hashless_texture_cache)                                 \

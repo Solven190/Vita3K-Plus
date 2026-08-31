@@ -44,11 +44,7 @@
 constexpr uint32_t STANDARD_PAGE_SIZE = KiB(4);
 constexpr size_t TOTAL_MEM_SIZE = GiB(4);
 constexpr bool LOG_PROTECT = false;
-#ifdef NDEBUG
-constexpr bool PAGE_NAME_TRACKING = false;
-#else
 constexpr bool PAGE_NAME_TRACKING = true;
-#endif
 
 // TODO: support multiple handlers
 static AccessViolationHandler access_violation_handler;
@@ -276,7 +272,7 @@ static void align_to_page(MemState &state, Address &addr, Address &size) {
     size = end - addr;
 }
 
-static bool apply_host_protect(uint8_t *target, size_t size, const MemPerm perm, size_t host_page_size) {
+static void apply_host_protect(uint8_t *target, size_t size, const MemPerm perm, size_t host_page_size) {
     uint8_t *aligned_start = reinterpret_cast<uint8_t *>(
         align_down(reinterpret_cast<uintptr_t>(target), host_page_size));
     uint8_t *aligned_end = reinterpret_cast<uint8_t *>(align(reinterpret_cast<uintptr_t>(target + size), host_page_size));
@@ -285,12 +281,10 @@ static bool apply_host_protect(uint8_t *target, size_t size, const MemPerm perm,
 #ifdef _WIN32
     DWORD old_protect = 0;
     const BOOL ret = VirtualProtect(aligned_start, aligned_size, (perm == MemPerm::None) ? PAGE_NOACCESS : ((perm == MemPerm::ReadOnly) ? PAGE_READONLY : PAGE_READWRITE), &old_protect);
-    LOG_CRITICAL_IF(!ret, "VirtualProtect failed: {}", get_error_msg());
-    return ret != 0;
+    LOG_CRITICAL_IF(!ret, "VirtualAlloc failed: {}", get_error_msg());
 #else
     const int ret = mprotect(aligned_start, aligned_size, (perm == MemPerm::None) ? PROT_NONE : ((perm == MemPerm::ReadOnly) ? PROT_READ : (PROT_READ | PROT_WRITE)));
     LOG_CRITICAL_IF(ret == -1, "mprotect failed: {}", get_error_msg());
-    return ret != -1;
 #endif
 }
 
@@ -346,6 +340,20 @@ void set_fault_context_provider(std::string (*provider)()) {
 bool handle_access_violation(MemState &state, uint8_t *addr, bool write) noexcept {
     const uintptr_t memory_addr = reinterpret_cast<uintptr_t>(state.memory.get());
     const uintptr_t fault_addr = reinterpret_cast<uintptr_t>(addr);
+
+    static thread_local bool handling_fault = false;
+    if (handling_fault)
+        return false;
+    struct FaultGuard {
+        bool &flag;
+        explicit FaultGuard(bool &f)
+            : flag(f) {
+            flag = true;
+        }
+        ~FaultGuard() {
+            flag = false;
+        }
+    } fault_guard(handling_fault);
 
     Address vaddr = 0;
     const std::unique_lock<std::mutex> lock(state.protect_mutex);
@@ -539,16 +547,9 @@ void remove_external_mapping(MemState &mem, uint8_t *addr_ptr, uint32_t size) {
         const std::unique_lock<std::mutex> lock(mem.protect_mutex);
         const std::lock_guard<std::mutex> ext_lock(mem.external_mapping_mutex);
         auto it = mem.external_mapping.find(addr_value);
+        assert(it != mem.external_mapping.end());
         if (it == mem.external_mapping.end()) {
             LOG_ERROR("[EXTMAP] remove MISS key=0x{:X} size=0x{:X}: entry already gone (was crashing via end() deref); {} live entries:", addr_value, size, mem.external_mapping.size());
-            int shown = 0;
-            for (const auto &kv : mem.external_mapping) {
-                if (shown++ >= 16) {
-                    LOG_ERROR("[EXTMAP]   ... ({} more)", mem.external_mapping.size() - 16);
-                    break;
-                }
-                LOG_ERROR("[EXTMAP]   live key=0x{:X} guest=0x{:X} size=0x{:X}", kv.first, kv.second.address, kv.second.size);
-            }
             return;
         }
 
@@ -585,23 +586,20 @@ void remove_external_mapping(MemState &mem, uint8_t *addr_ptr, uint32_t size) {
         const std::unique_lock<std::shared_mutex> transition_lock(mem.external_transition_mutex);
 
         uint8_t *arena = &mem.memory[mapping.address];
-        // The guest can free this memblock while the unmap is still deferred
-        if (apply_host_protect(arena, mapping.size, MemPerm::ReadWrite, mem.host_page_size)) {
-            memcpy(arena, addr_ptr, mapping.size);
-            for (int verify_pass = 0; verify_pass < 4; verify_pass++) {
-                int recopied = 0;
-                for (uint32_t off = 0; off < mapping.size; off += KiB(4)) {
-                    if (memcmp(arena + off, addr_ptr + off, KiB(4)) != 0) {
-                        memcpy(arena + off, addr_ptr + off, KiB(4));
-                        recopied++;
-                    }
+        apply_host_protect(arena, mapping.size, MemPerm::ReadWrite, mem.host_page_size);
+
+        memcpy(arena, addr_ptr, mapping.size);
+        for (int verify_pass = 0; verify_pass < 4; verify_pass++) {
+            int recopied = 0;
+            for (uint32_t off = 0; off < mapping.size; off += KiB(4)) {
+                if (memcmp(arena + off, addr_ptr + off, KiB(4)) != 0) {
+                    memcpy(arena + off, addr_ptr + off, KiB(4));
+                    recopied++;
                 }
-                if (recopied == 0)
-                    break;
-                LOG_WARN("remove_external_mapping 0x{:X} size 0x{:X}: verify pass {} re-copied {} page(s) changed by a concurrent writer", mapping.address, mapping.size, verify_pass, recopied);
             }
-        } else {
-            LOG_WARN("remove_external_mapping 0x{:X} size 0x{:X}: arena decommitted (guest freed it under a deferred unmap) — skipping copy-back", mapping.address, mapping.size);
+            if (recopied == 0)
+                break;
+            LOG_WARN("remove_external_mapping 0x{:X} size 0x{:X}: verify pass {} re-copied {} page(s) changed by a concurrent writer", mapping.address, mapping.size, verify_pass, recopied);
         }
 
         std::atomic_thread_fence(std::memory_order_release);
@@ -717,9 +715,20 @@ uint32_t mem_available(MemState &state) {
 
 const char *mem_name(Address address, MemState &state) {
     if (PAGE_NAME_TRACKING) {
-        return state.page_name_map.find(address / STANDARD_PAGE_SIZE)->second.c_str();
+        const int page = static_cast<int>(address / STANDARD_PAGE_SIZE);
+        auto it = state.page_name_map.upper_bound(page);
+        if (it == state.page_name_map.begin())
+            return "";
+        --it;
+        const AllocMemPage &owner = state.alloc_table[it->first];
+        if (owner.allocated && page < it->first + static_cast<int>(owner.size))
+            return it->second.c_str();
     }
     return "";
+}
+
+std::string fault_context() {
+    return g_fault_context_provider ? g_fault_context_provider() : std::string();
 }
 
 void deinit_mem(MemState &state) {

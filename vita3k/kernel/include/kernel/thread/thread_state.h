@@ -73,6 +73,12 @@ struct ThreadState {
 
     uint32_t last_import_nid = 0;
     uint32_t last_import_lr = 0;
+    uint32_t import_ring[16] = {};
+    uint8_t import_ring_pos = 0;
+    void push_import_ring(uint32_t nid) {
+        import_ring[import_ring_pos & 15] = nid;
+        import_ring_pos++;
+    }
     const char *wait_prim_kind = nullptr;
     SceUID wait_prim_uid = 0;
     uint32_t wait_extra = 0;

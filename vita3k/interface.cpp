@@ -438,12 +438,17 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv, const
         emuenv.post_app_launch_request(relaunch.value_or(AppLaunchRequest{ .reason = AppLaunchReason::ProcessExit }));
     };
     emuenv.kernel.accurate_thread_scheduling = emuenv.cfg.current_config.accurate_thread_scheduling;
-    LOG_INFO("CONFIG (applied): memory_mapping={} accurate_thread_scheduling={} high_accuracy={} res_multiplier={} guest_cores={}",
+    emuenv.kernel.preempt_on_wake = emuenv.cfg.current_config.preempt_on_wake;
+    emuenv.kernel.preempt_on_wake_us = emuenv.cfg.current_config.preempt_on_wake_us;
+    LOG_INFO("CONFIG (applied): memory_mapping={} accurate_thread_scheduling={} preempt_on_wake={} high_accuracy={} res_multiplier={} guest_cores={}",
         emuenv.cfg.current_config.memory_mapping, emuenv.cfg.current_config.accurate_thread_scheduling,
+        emuenv.cfg.current_config.preempt_on_wake,
         emuenv.cfg.current_config.high_accuracy, emuenv.cfg.current_config.resolution_multiplier, emuenv.cfg.current_config.guest_cores);
     guest_sched_set_cores(emuenv.cfg.current_config.guest_cores);
     if (emuenv.kernel.accurate_thread_scheduling)
         LOG_INFO("Accurate thread scheduling enabled: default-affinity guest threads run one at a time, by priority");
+    if (emuenv.kernel.preempt_on_wake)
+        LOG_INFO("Preempt-on-wake enabled ({}us window): a thread that wakes a higher-priority thread yields the host CPU so the woken thread runs first", emuenv.kernel.preempt_on_wake_us);
 
     if (!emuenv.kernel.init(emuenv.mem, call_import, emuenv.cfg.current_config.cpu_opt)) {
         LOG_WARN("Failed to init kernel!");
