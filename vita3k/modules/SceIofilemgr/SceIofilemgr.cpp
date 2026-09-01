@@ -137,7 +137,7 @@ EXPORT(int, _sceIoOpenAsync) {
 // guest call stack for reads of one filename
 static constexpr const char *watched_read_file_fragment = nullptr;
 
-EXPORT(SceSSize, _sceIoPread, SceUID fd, void *buf, SceSize nbyte, SceOff offset) {
+EXPORT(SceSSize, _sceIoPread, SceUID fd, Ptr<void> buf, SceSize nbyte, SceOff offset) {
     TRACY_FUNC(_sceIoPread, fd, buf, nbyte, offset);
     if (watched_read_file_fragment && *watched_read_file_fragment) {
         const auto file = emuenv.io.std_files.find(fd);
@@ -148,9 +148,9 @@ EXPORT(SceSSize, _sceIoPread, SceUID fd, void *buf, SceSize nbyte, SceOff offset
                 thread ? thread->log_stack_traceback() : std::string("?"));
         }
     }
-    const int pread_result = read_file_at(buf, emuenv.io, fd, nbyte, offset, export_name);
-    iodiag_log_read_dst("pread", fd, offset, nbyte, pread_result, host_to_guest(emuenv.mem, buf),
-        mem_name(host_to_guest(emuenv.mem, buf), emuenv.mem),
+    const int pread_result = read_file_into_guest(emuenv.mem, buf.address(), emuenv.io, fd, nbyte, offset, export_name);
+    iodiag_log_read_dst("pread", fd, offset, nbyte, pread_result, buf.address(),
+        mem_name(buf.address(), emuenv.mem),
         [&]() { const ThreadStatePtr t = emuenv.kernel.get_thread(thread_id); return t ? t->name.c_str() : "?"; }());
     return pread_result;
 }
@@ -295,16 +295,16 @@ EXPORT(int, sceIoLseek32, const SceUID fd, const int32_t offset, const SceIoSeek
     return static_cast<int>(seek_file(fd, offset, whence, emuenv.io, export_name));
 }
 
-EXPORT(int, sceIoRead, const SceUID fd, void *data, const SceSize size) {
+EXPORT(int, sceIoRead, const SceUID fd, Ptr<void> data, const SceSize size) {
     TRACY_FUNC(sceIoRead, fd, data, size);
     if (emuenv.cfg.current_config.file_loading_delay > 0) {
         const uint32_t delay_us = emuenv.cfg.current_config.file_loading_delay * 1000 + size / 20;
         guest_sched_release_for_block();
         std::this_thread::sleep_for(std::chrono::microseconds(delay_us));
     }
-    const int diag_result = read_file(data, emuenv.io, fd, size, export_name);
-    iodiag_log_read_dst("read", fd, -1, size, diag_result, host_to_guest(emuenv.mem, data),
-        mem_name(host_to_guest(emuenv.mem, data), emuenv.mem),
+    const int diag_result = read_file_into_guest(emuenv.mem, data.address(), emuenv.io, fd, size, -1, export_name);
+    iodiag_log_read_dst("read", fd, -1, size, diag_result, data.address(),
+        mem_name(data.address(), emuenv.mem),
         [&]() { const ThreadStatePtr t = emuenv.kernel.get_thread(thread_id); return t ? t->name.c_str() : "?"; }());
     return diag_result;
 }

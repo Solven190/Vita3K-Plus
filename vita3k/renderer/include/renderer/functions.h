@@ -44,7 +44,7 @@ void create(SceGxmSyncObject *sync, State &state);
 void destroy(SceGxmSyncObject *sync, State &state, std::function<void()> dealloc = nullptr);
 void finish(State &state, Context *context);
 
-bool has_pending_deferred_unmap();
+bool has_dormant_mappings();
 
 enum class SyncWaitResult {
     Ready,

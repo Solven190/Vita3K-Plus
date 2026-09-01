@@ -644,7 +644,7 @@ EXPORT(int, sceIoOpenAsync) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(SceSSize, sceIoPread, SceUID fd, void *buf, SceSize nbyte, SceOff offset) {
+EXPORT(SceSSize, sceIoPread, SceUID fd, Ptr<void> buf, SceSize nbyte, SceOff offset) {
     TRACY_FUNC(sceIoPread, fd, buf, nbyte, offset);
 
     if (emuenv.cfg.current_config.file_loading_delay > 0) {
@@ -652,7 +652,7 @@ EXPORT(SceSSize, sceIoPread, SceUID fd, void *buf, SceSize nbyte, SceOff offset)
         guest_sched_release_for_block();
         std::this_thread::sleep_for(std::chrono::microseconds(delay_us));
     }
-    return read_file_at(buf, emuenv.io, fd, nbyte, offset, export_name);
+    return read_file_into_guest(emuenv.mem, buf.address(), emuenv.io, fd, nbyte, offset, export_name);
 }
 
 EXPORT(int, sceIoPreadAsync) {

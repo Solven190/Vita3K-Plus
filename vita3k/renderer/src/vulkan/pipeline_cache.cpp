@@ -49,6 +49,23 @@ namespace renderer::vulkan {
 // Size of the record containing what is needed for the pipeline construction (what is after is dynamic state)
 constexpr size_t record_pipeline_len = offsetof(GxmRecordState, vertex_streams);
 
+static uint64_t hash_pipeline_record(const GxmRecordState &record) {
+    alignas(8) uint8_t block[record_pipeline_len];
+    memcpy(block, &record, record_pipeline_len);
+    const auto zero = [&](const auto &field) {
+        const size_t off = reinterpret_cast<const uint8_t *>(&field) - reinterpret_cast<const uint8_t *>(&record);
+        memset(block + off, 0, sizeof(field));
+    };
+    zero(record.region_clip_mode);
+    zero(record.back_polygon_mode);
+    zero(record.back_depth_func);
+    zero(record.back_depth_write_mode);
+    zero(record.back_side_fragment_program_mode);
+    if (record.two_sided != SCE_GXM_TWO_SIDED_ENABLED)
+        zero(record.back_stencil_state_op);
+    return XXH3_64bits(block, record_pipeline_len);
+}
+
 // structure containing everything needed to compile a pipeline
 struct CompileRequest {
     // iterator to the pipeline location
@@ -1378,21 +1395,24 @@ void PipelineCache::bisect_pipeline_failure(const vk::GraphicsPipelineCreateInfo
 
 vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiveType &type, bool consider_for_async, MemState &mem) {
     const GxmRecordState &record = context.record;
-    // get the hash of the current context
-    uint64_t key = XXH3_64bits(&record, record_pipeline_len);
+    uint64_t key = hash_pipeline_record(record);
+    uint64_t raw_key = XXH3_64bits(&record, record_pipeline_len);
 
     // add the hash of the blending
     const std::shared_ptr<ProgramBinding> &fragment_program_binding = record.fragment_program_binding;
     const VKFragmentProgram &fragment_program = *reinterpret_cast<VKFragmentProgram *>(
         fragment_program_binding->fragment_program.get());
     key ^= fragment_program.blending_hash;
+    raw_key ^= fragment_program.blending_hash;
 
     // add the hash of the attribute and stream layout
     const std::shared_ptr<ProgramBinding> &vertex_program_binding = record.vertex_program_binding;
     key ^= vertex_program_binding->key_hash;
+    raw_key ^= vertex_program_binding->key_hash;
 
     // and also add the primitive type
     key ^= static_cast<uint64_t>(type);
+    raw_key ^= static_cast<uint64_t>(type);
 
     // can't use constexpr because of apple clang...
     const vk::Pipeline pipeline_compiling = std::bit_cast<vk::Pipeline, uint64_t>(~0ULL);
@@ -1405,20 +1425,20 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
     auto it = pipelines.find(key);
     if (it != pipelines.end()) {
         if (it->second != nullptr) {
+            if (it->second == pipeline_failed)
+                return nullptr;
+            if (raw_pipeline_keys_seen.insert(raw_key).second)
+                state.pipelines_redundant_avoided++;
             if (it->second == pipeline_compiling)
-                // pipeline is still compiling
                 return nullptr;
-            else if (it->second == pipeline_failed)
-                // the driver already rejected this one, don't try again
-                return nullptr;
-            else
-                return it->second;
+            return it->second;
         }
         already_in_cache = true;
     } else {
         // the pipeline hash was not in the cache;
         it = pipelines.insert({ key, pipeline_compiling }).first;
     }
+    raw_pipeline_keys_seen.insert(raw_key);
 
     // get the correct renderpass here
     const SceGxmProgram *gxm_fragment_shader = fragment_program_binding->program();

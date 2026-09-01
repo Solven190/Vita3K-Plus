@@ -1258,6 +1258,10 @@ void VKState::cleanup() {
 
     texture_cache.cleanup();
 
+    for (auto &[dormant_address, dormant] : dormant_mappings)
+        mapped_memories.insert_or_assign(dormant_address, std::move(dormant.mapping));
+    dormant_mappings.clear();
+    dormant_bytes = 0;
     for (auto &[addr, mapping] : mapped_memories) {
         if (auto *ext = std::get_if<ExternalBuffer>(&mapping.buffer_impl)) {
             device.destroyBuffer(mapping.buffer);
@@ -1487,6 +1491,7 @@ void VKState::swap_window() {
         device.waitIdle();
         const uint64_t freed = texture_cache.release_all_cached_textures();
         LOG_WARN("[ANDROID MEMORY] trim level {}: released {} MiB of cached textures", trim_level, freed / (1024 * 1024));
+        dormant_trim_requested = true;
         mem_diag::log_memory_snapshot("post-trim");
         logging::flush();
     }
@@ -1600,6 +1605,9 @@ void VKState::set_screen_filter(const std::string_view &filter) {
 }
 #endif
 
+// Flip this on only when hunting a LMK kill around a specific transition
+inline constexpr bool snapshot_on_memory_transition = false;
+
 bool VKState::map_memory_page_table_fallback(MemState &mem, Ptr<void> address, uint32_t size) {
     constexpr vk::BufferUsageFlags mapped_memory_flags = vk::BufferUsageFlagBits::eIndexBuffer | vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eShaderDeviceAddress | vk::BufferUsageFlagBits::eTransferDst;
     vkutil::Buffer buffer(size + KiB(4));
@@ -1629,7 +1637,11 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
     assert(features.enable_memory_mapping);
     // the address should be 4K aligned
     assert((address.address() & 4095) == 0);
-    LOG_INFO("map_memory: addr 0x{:X} size 0x{:X} method {}", address.address(), size, static_cast<int>(mapping_method));
+    {
+        static uint64_t map_calls = 0;
+        if (((++map_calls) & 255) == 1)
+            LOG_INFO("map_memory #{}: addr 0x{:X} size 0x{:X} method {}", map_calls, address.address(), size, static_cast<int>(mapping_method));
+    }
     constexpr vk::BufferUsageFlags mapped_memory_flags = vk::BufferUsageFlagBits::eIndexBuffer | vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eShaderDeviceAddress | vk::BufferUsageFlagBits::eTransferDst;
 
     auto find_mem_type_with_flag = [&](const vk::MemoryPropertyFlags flags, uint32_t hardware_types) {
@@ -1841,7 +1853,7 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
         buffer.init_buffer(mapped_memory_flags, memory_mapped_alloc);
         {
             const vk::MemoryPropertyFlags got = allocator.getAllocationMemoryProperties(buffer.allocation);
-            LOG_INFO("PageTable mapping memory: HostCached={} HostCoherent={} DeviceLocal={}",
+            LOG_INFO_ONCE("PageTable mapping memory: HostCached={} HostCoherent={} DeviceLocal={}",
                 static_cast<bool>(got & vk::MemoryPropertyFlagBits::eHostCached),
                 static_cast<bool>(got & vk::MemoryPropertyFlagBits::eHostCoherent),
                 static_cast<bool>(got & vk::MemoryPropertyFlagBits::eDeviceLocal));
@@ -1948,8 +1960,8 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
         break;
     }
 
-    // memory state right after every mapping - if an LMK kill follows one, the last snapshot is the evidence
-    mem_diag::log_memory_snapshot("map_memory");
+    if (snapshot_on_memory_transition)
+        mem_diag::log_memory_snapshot("map_memory");
     return true;
 }
 
@@ -1976,6 +1988,59 @@ void VKState::trim_native_buffer_cache(uint64_t budget) {
     }
 }
 #endif
+
+bool VKState::make_dormant(Address address) {
+    auto ite = mapped_memories.find(address);
+    if (ite == mapped_memories.end())
+        return false;
+    const uint32_t size = ite->second.size;
+    dormant_mappings.insert_or_assign(address, DormantMapping{ std::move(ite->second), ++dormant_stamp });
+    mapped_memories.erase(ite);
+    dormant_bytes += size;
+    return true;
+}
+
+bool VKState::promote_dormant(Address address, uint32_t size) {
+    auto ite = dormant_mappings.find(address);
+    if (ite == dormant_mappings.end() || ite->second.mapping.size != size)
+        return false;
+    mapped_memories.insert_or_assign(address, std::move(ite->second.mapping));
+    dormant_bytes -= size;
+    dormant_mappings.erase(ite);
+    return true;
+}
+
+void VKState::teardown_dormant(MemState &mem, Address address) {
+    auto ite = dormant_mappings.find(address);
+    if (ite == dormant_mappings.end())
+        return;
+    const uint32_t size = ite->second.mapping.size;
+    mapped_memories.insert_or_assign(address, std::move(ite->second.mapping));
+    dormant_bytes -= size;
+    dormant_mappings.erase(ite);
+    unmap_memory(mem, Ptr<void>(address));
+}
+
+Address VKState::oldest_dormant() const {
+    Address best = 0;
+    uint64_t best_stamp = ~0ULL;
+    for (const auto &[address, entry] : dormant_mappings) {
+        if (entry.stamp < best_stamp) {
+            best_stamp = entry.stamp;
+            best = address;
+        }
+    }
+    return best;
+}
+
+std::vector<Address> VKState::dormant_overlapping(Address start, Address end) const {
+    std::vector<Address> result;
+    for (const auto &[address, entry] : dormant_mappings) {
+        if (address < end && start < address + entry.mapping.size)
+            result.push_back(address);
+    }
+    return result;
+}
 
 void VKState::unmap_memory(MemState &mem, Ptr<void> address) {
     assert(features.enable_memory_mapping);
@@ -2062,7 +2127,8 @@ void VKState::unmap_memory(MemState &mem, Ptr<void> address) {
         break;
     }
     mapped_memories.erase(ite);
-    mem_diag::log_memory_snapshot("unmap_memory");
+    if (snapshot_on_memory_transition)
+        mem_diag::log_memory_snapshot("unmap_memory");
 }
 
 std::tuple<vk::Buffer, uint32_t> VKState::get_matching_mapping(const Ptr<void> address) {

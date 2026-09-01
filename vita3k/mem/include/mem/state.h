@@ -82,4 +82,9 @@ struct MemState {
     std::map<uint64_t, MemExternalMapping, std::greater<>> external_mapping;
     mutable std::mutex external_mapping_mutex;
     mutable std::shared_mutex external_transition_mutex;
+
+    int transition_not_parked = -1;
+    uint64_t transition_count = 0;
+    uint64_t transition_recopy_events = 0;
+    uint64_t transition_recopy_events_fully_parked = 0;
 };

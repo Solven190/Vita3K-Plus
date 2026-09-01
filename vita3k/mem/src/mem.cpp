@@ -375,6 +375,10 @@ bool handle_access_violation(MemState &state, uint8_t *addr, bool write) noexcep
     }
 
     if (!is_valid_addr(state, vaddr)) {
+        static std::atomic<uint32_t> invalid_count{ 0 };
+        if (invalid_count.fetch_add(1, std::memory_order_relaxed) < 8)
+            LOG_CRITICAL("Refused {} to INVALID guest address 0x{:X} (host 0x{:X}){}", write ? "write" : "read", vaddr, fault_addr,
+                g_fault_context_provider ? g_fault_context_provider() : std::string());
         return false;
     }
     if (LOG_PROTECT) {
@@ -383,6 +387,10 @@ bool handle_access_violation(MemState &state, uint8_t *addr, bool write) noexcep
 
     // never allow accesses to the null guard page - letting them through silently corrupts low memory
     if (vaddr < 0x1000) {
+        static std::atomic<uint32_t> null_count{ 0 };
+        if (null_count.fetch_add(1, std::memory_order_relaxed) < 8)
+            LOG_CRITICAL("Refused {} to the NULL guard page (guest 0x{:X}){}", write ? "write" : "read", vaddr,
+                g_fault_context_provider ? g_fault_context_provider() : std::string());
         return false;
     }
 
@@ -390,6 +398,17 @@ bool handle_access_violation(MemState &state, uint8_t *addr, bool write) noexcep
     const auto unhandled_but_valid = [&]() {
         apply_host_protect(reinterpret_cast<uint8_t *>(align_down(fault_addr, state.host_page_size)),
             state.host_page_size, MemPerm::ReadWrite, state.host_page_size);
+        const bool arena_fault = fault_addr >= memory_addr && fault_addr < memory_addr + TOTAL_MEM_SIZE;
+        const bool stale_host_pointer = arena_fault && state.use_page_table && state.page_table[vaddr / KiB(4)] != state.memory.get();
+        if (stale_host_pointer) {
+            static std::atomic<uint32_t> stale_count{ 0 };
+            const uint32_t n = stale_count.fetch_add(1, std::memory_order_relaxed);
+            if (n < 8 || (n & 63) == 0)
+                LOG_CRITICAL("STALE HOST POINTER: host-side {} into the ARENA of guest 0x{:X} whose live backing is a mapped buffer -- the data will diverge from what the guest reads (#{}){}",
+                    write ? "write" : "read", vaddr, n + 1,
+                    g_fault_context_provider ? g_fault_context_provider() : std::string());
+            return;
+        }
         static std::atomic<uint32_t> count{ 0 };
         const uint32_t n = count.fetch_add(1, std::memory_order_relaxed);
         if (n < 8) {
@@ -501,6 +520,34 @@ bool is_protecting(MemState &state, Address addr, MemPerm *perm) {
     return false;
 }
 
+// Verify that dst is a faithful copy of src after the bulk memcpy of a page-table transition
+static void verify_and_recopy(MemState &mem, uint8_t *dst, const uint8_t *src, uint32_t size, const char *what, Address addr) {
+    mem.transition_count++;
+    bool recopied_any = false;
+    for (int verify_pass = 0; verify_pass < 4; verify_pass++) {
+        if (memcmp(dst, src, size) == 0)
+            break;
+        int recopied = 0;
+        for (uint32_t off = 0; off < size; off += KiB(4)) {
+            if (memcmp(dst + off, src + off, KiB(4)) != 0) {
+                memcpy(dst + off, src + off, KiB(4));
+                recopied++;
+            }
+        }
+        if (recopied == 0)
+            break;
+        recopied_any = true;
+        LOG_WARN("{} 0x{:X} size 0x{:X}: verify pass {} re-copied {} page(s) changed by a concurrent writer (world not_parked={})", what, addr, size, verify_pass, recopied, mem.transition_not_parked);
+    }
+    if (recopied_any) {
+        mem.transition_recopy_events++;
+        if (mem.transition_not_parked == 0)
+            mem.transition_recopy_events_fully_parked++;
+    }
+    if ((mem.transition_count & 255) == 0)
+        LOG_INFO("[VERIFY] {} page-table transitions, {} had a concurrent-writer re-copy, {} of those with the world fully parked", mem.transition_count, mem.transition_recopy_events, mem.transition_recopy_events_fully_parked);
+}
+
 void add_external_mapping(MemState &mem, Address addr, uint32_t size, uint8_t *addr_ptr) {
     assert((size & 4095) == 0);
     if (!mem.use_page_table)
@@ -513,20 +560,7 @@ void add_external_mapping(MemState &mem, Address addr, uint32_t size, uint8_t *a
     const std::unique_lock<std::shared_mutex> transition_lock(mem.external_transition_mutex);
 
     memcpy(addr_ptr, original_address, size);
-
-    int verify_pass = 0;
-    for (; verify_pass < 4; verify_pass++) {
-        int recopied = 0;
-        for (uint32_t off = 0; off < size; off += KiB(4)) {
-            if (memcmp(addr_ptr + off, original_address + off, KiB(4)) != 0) {
-                memcpy(addr_ptr + off, original_address + off, KiB(4));
-                recopied++;
-            }
-        }
-        if (recopied == 0)
-            break;
-        LOG_WARN("add_external_mapping 0x{:X} size 0x{:X}: verify pass {} re-copied {} page(s) changed by a concurrent writer", addr, size, verify_pass, recopied);
-    }
+    verify_and_recopy(mem, addr_ptr, original_address, size, "add_external_mapping", addr);
 
     std::atomic_thread_fence(std::memory_order_release);
     for (uint32_t block = 0; block < size / KiB(4); block++)
@@ -589,18 +623,7 @@ void remove_external_mapping(MemState &mem, uint8_t *addr_ptr, uint32_t size) {
         apply_host_protect(arena, mapping.size, MemPerm::ReadWrite, mem.host_page_size);
 
         memcpy(arena, addr_ptr, mapping.size);
-        for (int verify_pass = 0; verify_pass < 4; verify_pass++) {
-            int recopied = 0;
-            for (uint32_t off = 0; off < mapping.size; off += KiB(4)) {
-                if (memcmp(arena + off, addr_ptr + off, KiB(4)) != 0) {
-                    memcpy(arena + off, addr_ptr + off, KiB(4));
-                    recopied++;
-                }
-            }
-            if (recopied == 0)
-                break;
-            LOG_WARN("remove_external_mapping 0x{:X} size 0x{:X}: verify pass {} re-copied {} page(s) changed by a concurrent writer", mapping.address, mapping.size, verify_pass, recopied);
-        }
+        verify_and_recopy(mem, arena, addr_ptr, mapping.size, "remove_external_mapping", mapping.address);
 
         std::atomic_thread_fence(std::memory_order_release);
         for (uint32_t block = 0; block < mapping.size / KiB(4); block++)

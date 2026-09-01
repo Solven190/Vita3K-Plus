@@ -116,6 +116,7 @@ struct State {
 
     // on Vulkan, this is actually the number of pipelines compiled
     uint32_t shaders_count_compiled = 0;
+    uint32_t pipelines_redundant_avoided = 0;
     uint32_t programs_count_pre_compiled = 0;
 
     std::atomic<uint64_t> progress_counter{ 0 };

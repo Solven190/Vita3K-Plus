@@ -28,6 +28,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 struct SceGxmProgram;
@@ -96,6 +97,7 @@ private:
     // because of multithreading, we want the pointers to remain stable
     unordered_map_stable<Sha256Hash, vk::ShaderModule> shaders;
     unordered_map_stable<uint64_t, vk::Pipeline> pipelines;
+    std::unordered_set<uint64_t> raw_pipeline_keys_seen;
 
     // --- diagnostics -------------------------------------------------------------------------
     // Everything below only exists so that a single run produces enough information to explain a

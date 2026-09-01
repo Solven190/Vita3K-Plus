@@ -114,6 +114,20 @@ struct VKState : public renderer::State {
     void release_cached_native_buffer(CachedNativeBuffer &cached);
     void trim_native_buffer_cache(uint64_t budget);
 #endif
+    struct DormantMapping {
+        MappedMemory mapping;
+        uint64_t stamp; // monotonically increasing; lowest = least recently made dormant (LRU eviction)
+    };
+    std::map<Address, DormantMapping> dormant_mappings;
+    uint64_t dormant_bytes = 0;
+    uint64_t dormant_stamp = 0;
+    bool dormant_trim_requested = false;
+    bool make_dormant(Address address);
+    bool promote_dormant(Address address, uint32_t size);
+    void teardown_dormant(MemState &mem, Address address);
+    Address oldest_dormant() const;
+    std::vector<Address> dormant_overlapping(Address start, Address end) const;
+
     // used with double buffer memory trapping
     BufferTrapping buffer_trapping;
     // modify the behavior of trapping on vertex buffers if there are shader stores

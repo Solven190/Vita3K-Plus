@@ -30,6 +30,17 @@
 #include <util/preprocessor.h>
 #include <util/string_utils.h>
 
+#include <mem/ptr.h>
+#include <mem/state.h>
+#include <mem/util.h>
+#include <util/align.h>
+
+#include <algorithm>
+#include <atomic>
+#include <cstring>
+#include <shared_mutex>
+#include <vector>
+
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
@@ -465,6 +476,50 @@ int read_file_at(void *data, IOState &io, const SceUID fd, const SceSize size, c
         }
     }
     return static_cast<int>(read);
+}
+
+int read_file_into_guest(MemState &mem, Address dst, IOState &io, SceUID fd, SceSize size, SceOff offset, const char *export_name) {
+    const auto read_to = [&](void *host) {
+        return offset < 0 ? read_file(host, io, fd, size, export_name) : read_file_at(host, io, fd, size, offset, export_name);
+    };
+    if (!mem.use_page_table || size == 0 || dst == 0)
+        return read_to(Ptr<void>(dst).get(mem));
+
+    const std::shared_lock<std::shared_mutex> transition_lock(mem.external_transition_mutex);
+
+    uint8_t *const base = mem.page_table[dst / KiB(4)];
+    bool contiguous = true;
+    for (Address page = align_down(dst, KiB(4)) + KiB(4); page < dst + size; page += KiB(4)) {
+        if (mem.page_table[page / KiB(4)] != base) {
+            contiguous = false;
+            break;
+        }
+    }
+
+    static std::atomic<uint32_t> mapped_reads{ 0 };
+    static std::atomic<uint32_t> split_reads{ 0 };
+    if (base != mem.memory.get()) {
+        const uint32_t n = mapped_reads.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n == 1 || (n & 255) == 0)
+            LOG_INFO("[IO] {}: file read of {} bytes into a GPU-mapped guest range 0x{:X}, resolved under the transition lock ({} such reads so far, {} split across backings)", export_name, size, dst, n, split_reads.load(std::memory_order_relaxed));
+    }
+    if (contiguous)
+        return read_to(Ptr<void>(dst).get(mem));
+
+    split_reads.fetch_add(1, std::memory_order_relaxed);
+    static thread_local std::vector<uint8_t> temp;
+    temp.resize(size);
+    const int got = read_to(temp.data());
+    if (got <= 0)
+        return got;
+    uint32_t off = 0;
+    while (off < static_cast<uint32_t>(got)) {
+        const Address cur = dst + off;
+        const uint32_t chunk = std::min<uint32_t>(static_cast<uint32_t>(got) - off, static_cast<uint32_t>(KiB(4) - (cur & 0xFFFu)));
+        memcpy(Ptr<uint8_t>(cur).get(mem), temp.data() + off, chunk);
+        off += chunk;
+    }
+    return got;
 }
 
 int write_file_at(const SceUID fd, const void *data, const SceSize size, const SceOff offset, IOState &io, const char *export_name) {

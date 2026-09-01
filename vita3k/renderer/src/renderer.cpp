@@ -50,6 +50,8 @@ void State::update_overlays() {
             m_shaders_compiled_count += newly_compiled;
             shaders_count_compiled = 0;
             m_shaders_compiled_time = now;
+            if (current_backend == Backend::Vulkan)
+                LOG_INFO("[PIPELINE] {} pipeline(s) compiled in this burst ({} in this notice); key normalisation has avoided {} redundant compile(s) so far this session", newly_compiled, m_shaders_compiled_count, pipelines_redundant_avoided);
 
             auto notice = overlay_manager->get<overlay::shader_compile_notice>();
             if (!notice)
