@@ -174,8 +174,10 @@ void set_stencil_ref(State &state, Context *ctx, bool is_front, unsigned char sr
     renderer::add_state_set_command(ctx, renderer::GXMState::StencilRef, is_front, sref);
 }
 
-void set_program(State &state, Context *ctx, Ptr<const void> program, const bool is_fragment) {
-    renderer::add_state_set_command(ctx, renderer::GXMState::Program, program, is_fragment);
+void set_program(State &state, Context *ctx, Ptr<const void> program, const std::shared_ptr<ProgramBinding> &binding, bool is_fragment) {
+    auto *binding_payload = new std::shared_ptr<ProgramBinding>(binding);
+    if (!renderer::add_state_set_command(ctx, renderer::GXMState::Program, program, binding_payload, is_fragment))
+        delete binding_payload;
 }
 
 void set_cull_mode(State &state, Context *ctx, SceGxmCullMode cull) {

@@ -1579,7 +1579,7 @@ EXPORT(void, sceGxmSetDefaultRegionClipAndViewport, SceGxmContext *context, uint
     }
 }
 
-static void gxmContextStateRestore(renderer::State &state, SceGxmContext *context, const bool sync_viewport_and_clip) {
+static void gxmContextStateRestore(renderer::State &state, SceGxmContext *context, const MemState &mem, const bool sync_viewport_and_clip) {
     if (sync_viewport_and_clip) {
         renderer::set_region_clip(state, context->renderer.get(), SCE_GXM_REGION_CLIP_OUTSIDE,
             context->state.region_clip_min.x, context->state.region_clip_max.x, context->state.region_clip_min.y,
@@ -1617,14 +1617,16 @@ static void gxmContextStateRestore(renderer::State &state, SceGxmContext *contex
     }
 
     if (context->state.vertex_program) {
-        renderer::set_program(state, context->renderer.get(), context->state.vertex_program, false);
+        const auto *program = context->state.vertex_program.get(mem);
+        renderer::set_program(state, context->renderer.get(), context->state.vertex_program, program->renderer_binding, false);
 
         context->is_vert_texture_dirty.set();
     }
 
     // The uniform buffer, vertex stream will be uploaded later, for now only need to resync de textures
     if (context->state.fragment_program) {
-        renderer::set_program(state, context->renderer.get(), context->state.fragment_program, true);
+        const auto *program = context->state.fragment_program.get(mem);
+        renderer::set_program(state, context->renderer.get(), context->state.fragment_program, program->renderer_binding, true);
 
         context->is_frag_texture_dirty.set();
     }
@@ -1688,7 +1690,7 @@ EXPORT(int, sceGxmBeginCommandList, SceGxmContext *deferredContext) {
 
     // Begin the command list by white washing previous command list, and restoring deferred state
     renderer::reset_command_list(deferredContext->renderer->command_list);
-    gxmContextStateRestore(*emuenv.renderer, deferredContext, false);
+    gxmContextStateRestore(*emuenv.renderer, deferredContext, emuenv.mem, false);
 
     deferredContext->state.active = true;
 
@@ -2400,8 +2402,8 @@ static int gxmDrawElementGeneral(EmuEnvState &emuenv, const char *export_name, c
 
     if (context->last_precomputed || pre_vert || pre_frag) {
         // Need to re-set the data
-        renderer::set_program(*emuenv.renderer, context->renderer.get(), vert_program_ptr, false);
-        renderer::set_program(*emuenv.renderer, context->renderer.get(), frag_program_ptr, true);
+        renderer::set_program(*emuenv.renderer, context->renderer.get(), vert_program_ptr, gxm_vertex_program.renderer_binding, false);
+        renderer::set_program(*emuenv.renderer, context->renderer.get(), frag_program_ptr, gxm_fragment_program.renderer_binding, true);
 
         context->last_precomputed = false;
     }
@@ -2535,8 +2537,8 @@ EXPORT(int, sceGxmDrawPrecomputed, SceGxmContext *context, SceGxmPrecomputedDraw
         return RET_ERROR(SCE_GXM_ERROR_NULL_PROGRAM);
     }
 
-    renderer::set_program(*emuenv.renderer, context->renderer.get(), fragment_program_gptr, true);
-    renderer::set_program(*emuenv.renderer, context->renderer.get(), vertex_program_gptr, false);
+    renderer::set_program(*emuenv.renderer, context->renderer.get(), fragment_program_gptr, fragment_program->renderer_binding, true);
+    renderer::set_program(*emuenv.renderer, context->renderer.get(), vertex_program_gptr, vertex_program->renderer_binding, false);
 
     // Set uniforms
     const SceGxmProgram &vertex_program_gxp = *vertex_program->program.get(emuenv.mem);
@@ -2731,7 +2733,7 @@ EXPORT(int, sceGxmExecuteCommandList, SceGxmContext *context, SceGxmCommandList 
     }
 
     // Restore back our GXM state
-    gxmContextStateRestore(*emuenv.renderer, context, true);
+    gxmContextStateRestore(*emuenv.renderer, context, emuenv.mem, true);
 
     return 0;
 }
@@ -3990,7 +3992,7 @@ EXPORT(void, sceGxmSetFragmentProgram, SceGxmContext *context, Ptr<const SceGxmF
         return;
 
     context->state.fragment_program = fragmentProgram;
-    renderer::set_program(*emuenv.renderer, context->renderer.get(), fragmentProgram, true);
+    renderer::set_program(*emuenv.renderer, context->renderer.get(), fragmentProgram, fragmentProgram.get(emuenv.mem)->renderer_binding, true);
 }
 
 EXPORT(int, sceGxmSetFragmentTexture, SceGxmContext *context, uint32_t textureIndex, const SceGxmTexture *texture) {
@@ -4374,7 +4376,7 @@ EXPORT(void, sceGxmSetVertexProgram, SceGxmContext *context, Ptr<const SceGxmVer
         return;
 
     context->state.vertex_program = vertexProgram;
-    renderer::set_program(*emuenv.renderer, context->renderer.get(), vertexProgram, false);
+    renderer::set_program(*emuenv.renderer, context->renderer.get(), vertexProgram, vertexProgram.get(emuenv.mem)->renderer_binding, false);
 }
 
 EXPORT(int, sceGxmSetVertexStream, SceGxmContext *context, uint32_t streamIndex, Ptr<const void> streamData) {
@@ -4544,7 +4546,38 @@ static void free_callbacked(EmuEnvState &emuenv, SceUID thread_id, SceGxmShaderP
 
 template <typename T>
 static void free_callbacked(EmuEnvState &emuenv, SceUID thread_id, SceGxmShaderPatcher *shaderPatcher, Ptr<T> data) {
-    free_callbacked(emuenv, thread_id, shaderPatcher, data.address());
+    // These opaque objects are placement-constructed in guest callback memory, but contain
+    // host-side vectors/shared_ptrs. Release those resources before returning the allocation.
+    // Snapshot the callback parameters first because data may be the shader patcher itself.
+    const SceGxmShaderPatcherParams params = shaderPatcher->params;
+    data.get(emuenv.mem)->~T();
+    if (!params.hostFreeCallback) {
+        LOG_ERROR("Empty hostFreeCallback");
+    }
+    const auto thread = emuenv.kernel.get_thread(thread_id);
+    thread->run_callback(params.hostFreeCallback.address(), { params.userData.address(), data.address() });
+}
+
+static std::shared_ptr<renderer::ProgramBinding> make_fragment_program_binding(const SceGxmFragmentProgram &program, const MemState &mem) {
+    auto binding = std::make_shared<renderer::ProgramBinding>();
+    const SceGxmProgram *gxp = program.program.get(mem);
+    const auto *gxp_bytes = reinterpret_cast<const uint8_t *>(gxp);
+    binding->gxp.assign(gxp_bytes, gxp_bytes + gxp->size);
+    binding->fragment_program = program.renderer_data;
+    binding->is_maskupdate = program.is_maskupdate;
+    return binding;
+}
+
+static std::shared_ptr<renderer::ProgramBinding> make_vertex_program_binding(const SceGxmVertexProgram &program, const MemState &mem) {
+    auto binding = std::make_shared<renderer::ProgramBinding>();
+    const SceGxmProgram *gxp = program.program.get(mem);
+    const auto *gxp_bytes = reinterpret_cast<const uint8_t *>(gxp);
+    binding->gxp.assign(gxp_bytes, gxp_bytes + gxp->size);
+    binding->vertex_program = program.renderer_data;
+    binding->streams = program.streams;
+    binding->attributes = program.attributes;
+    binding->key_hash = program.key_hash;
+    return binding;
 }
 
 EXPORT(int, sceGxmShaderPatcherAddRefFragmentProgram, SceGxmShaderPatcher *shaderPatcher, SceGxmFragmentProgram *fragmentProgram) {
@@ -4618,9 +4651,12 @@ EXPORT(int, sceGxmShaderPatcherCreateFragmentProgram, SceGxmShaderPatcher *shade
     fp->is_maskupdate = false;
     fp->program = programId->program;
 
-    if (!renderer::create(fp->renderer_data, *emuenv.renderer, *programId->program.get(mem), blendInfo, emuenv.renderer->gxp_ptr_map)) {
+    std::unique_ptr<renderer::FragmentProgram> renderer_data;
+    if (!renderer::create(renderer_data, *emuenv.renderer, *programId->program.get(mem), blendInfo, emuenv.renderer->gxp_ptr_map)) {
         return RET_ERROR(SCE_GXM_ERROR_DRIVER);
     }
+    fp->renderer_data = std::move(renderer_data);
+    fp->renderer_binding = make_fragment_program_binding(*fp, mem);
 
     shaderPatcher->fragment_program_cache.emplace(key, *fragmentProgram);
 
@@ -4645,9 +4681,12 @@ EXPORT(int, sceGxmShaderPatcherCreateMaskUpdateFragmentProgram, SceGxmShaderPatc
     fp->program = Ptr<const SceGxmProgram>(alloc_callbacked(emuenv, thread_id, shaderPatcher->params, size_mask_gxp));
     memcpy(const_cast<SceGxmProgram *>(fp->program.get(mem)), mask_gxp, size_mask_gxp);
 
-    if (!renderer::create(fp->renderer_data, *emuenv.renderer, *fp->program.get(mem), nullptr, emuenv.renderer->gxp_ptr_map)) {
+    std::unique_ptr<renderer::FragmentProgram> renderer_data;
+    if (!renderer::create(renderer_data, *emuenv.renderer, *fp->program.get(mem), nullptr, emuenv.renderer->gxp_ptr_map)) {
         return RET_ERROR(SCE_GXM_ERROR_DRIVER);
     }
+    fp->renderer_data = std::move(renderer_data);
+    fp->renderer_binding = make_fragment_program_binding(*fp, mem);
 
     return 0;
 }
@@ -4697,9 +4736,12 @@ EXPORT(int, sceGxmShaderPatcherCreateVertexProgram, SceGxmShaderPatcher *shaderP
         vp->attributes.insert(vp->attributes.end(), &attributes[0], &attributes[attributeCount]);
     }
 
-    if (!renderer::create(vp->renderer_data, *emuenv.renderer, *programId->program.get(mem), emuenv.renderer->gxp_ptr_map, vp->attributes)) {
+    std::unique_ptr<renderer::VertexProgram> renderer_data;
+    if (!renderer::create(renderer_data, *emuenv.renderer, *programId->program.get(mem), emuenv.renderer->gxp_ptr_map, vp->attributes)) {
         return RET_ERROR(SCE_GXM_ERROR_DRIVER);
     }
+    vp->renderer_data = std::move(renderer_data);
+    vp->renderer_binding = make_vertex_program_binding(*vp, mem);
 
     shaderPatcher->vertex_program_cache.emplace(key, *vertexProgram);
 
@@ -4724,6 +4766,13 @@ EXPORT(int, sceGxmShaderPatcherForceUnregisterProgram, SceGxmShaderPatcher *shad
 
     SceGxmRegisteredProgram *rp = programId.get(emuenv.mem);
 
+    // Drain the renderer before tearing the cached wrappers down, exactly as Release{Fragment,Vertex}Program
+    // do. Queued draws hold their own shared ProgramBinding so the record is safe regardless, but this is a
+    // bulk teardown path (Killzone's death/checkpoint reload) and the precomputed-state path still carries
+    // guest pointers, so finish outstanding work before the guest allocation is recycled.
+    guest_sched_release_for_block();
+    renderer::finish(*emuenv.renderer, nullptr);
+
     // look for existing programs and free them
     if (rp->program.get(emuenv.mem)->is_vertex()) {
         for (auto it = shaderPatcher->vertex_program_cache.begin(); it != shaderPatcher->vertex_program_cache.end();) {
@@ -4732,7 +4781,7 @@ EXPORT(int, sceGxmShaderPatcherForceUnregisterProgram, SceGxmShaderPatcher *shad
                 while (vertex_program->compile_threads_on.load(std::memory_order_acquire) > 0)
                     std::this_thread::yield();
 
-                free_callbacked(emuenv, thread_id, shaderPatcher, it->second.address());
+                free_callbacked(emuenv, thread_id, shaderPatcher, it->second);
                 it = shaderPatcher->vertex_program_cache.erase(it);
             } else {
                 ++it;
@@ -4745,7 +4794,7 @@ EXPORT(int, sceGxmShaderPatcherForceUnregisterProgram, SceGxmShaderPatcher *shad
                 while (frag_program->compile_threads_on.load(std::memory_order_acquire) > 0)
                     std::this_thread::yield();
 
-                free_callbacked(emuenv, thread_id, shaderPatcher, it->second.address());
+                free_callbacked(emuenv, thread_id, shaderPatcher, it->second);
                 it = shaderPatcher->fragment_program_cache.erase(it);
             } else {
                 ++it;

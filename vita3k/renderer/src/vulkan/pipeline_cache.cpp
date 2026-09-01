@@ -57,8 +57,9 @@ struct CompileRequest {
     // this is everything we need to compile the shader on another thread (as the original data will change)
     SceGxmPrimitiveType type;
     vk::RenderPass render_pass;
-    SceGxmVertexProgram *vertex_program_gxm;
-    SceGxmFragmentProgram *fragment_program_gxm;
+    std::shared_ptr<ProgramBinding> vertex_program_binding;
+    std::shared_ptr<ProgramBinding> fragment_program_binding;
+    bool has_color_surface_data;
     shader::Hints hints;
 
     // the content of the record useful for the pipeline creation
@@ -914,7 +915,7 @@ std::string PipelineCache::describe_shader(const Sha256Hash &hash) {
     return describe_spirv_module(source.data(), source.size());
 }
 
-vk::PipelineVertexInputStateCreateInfo PipelineCache::get_vertex_input_state(const SceGxmVertexProgram &vertex_program, MemState &mem) {
+vk::PipelineVertexInputStateCreateInfo PipelineCache::get_vertex_input_state(const ProgramBinding &vertex_program) {
     // pointer to these objects are returned (so it needs to be static)
     // and each thread needs one (hence the thread_local)
     static thread_local std::vector<vk::VertexInputBindingDescription> binding_descr;
@@ -923,7 +924,7 @@ vk::PipelineVertexInputStateCreateInfo PipelineCache::get_vertex_input_state(con
     attr_descr.clear();
 
     // Vertex attributes.
-    VertexProgram *vkvert = vertex_program.renderer_data.get();
+    VertexProgram *vkvert = vertex_program.vertex_program.get();
 
     uint32_t used_streams = 0;
 
@@ -1041,13 +1042,10 @@ void PipelineCache::compiler_thread(MemState &mem) {
             // use this as an instruction to stop the thread
             break;
 
-        vk::Pipeline pipeline = compile_pipeline(request->type, request->render_pass, *request->vertex_program_gxm, *request->fragment_program_gxm, *request->get_record(), request->hints, mem);
+        vk::Pipeline pipeline = compile_pipeline(request->type, request->render_pass, *request->vertex_program_binding, *request->fragment_program_binding, *request->get_record(), request->has_color_surface_data, request->hints, mem);
         // mark a refused pipeline as failed rather than leaving it null, which would make every
         // later draw queue the same doomed compilation again
         *request->pipeline = pipeline ? pipeline : std::bit_cast<vk::Pipeline, uint64_t>(~1ULL);
-
-        request->vertex_program_gxm->compile_threads_on.fetch_sub(1, std::memory_order_release);
-        request->fragment_program_gxm->compile_threads_on.fetch_sub(1, std::memory_order_release);
 
         const auto time_s = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
         next_pipeline_cache_save = time_s + pipeline_cache_save_delay;
@@ -1067,17 +1065,17 @@ static vk::StencilOpState convert_op_state(const GxmStencilStateOp &state) {
     };
 }
 
-vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::RenderPass render_pass, const SceGxmVertexProgram &vertex_program_gxm, const SceGxmFragmentProgram &fragment_program_gxm, const GxmRecordState &record, const shader::Hints &hints, MemState &mem) {
-    const VertexProgram &vertex_program = *vertex_program_gxm.renderer_data;
-    const SceGxmProgram *gxm_fragment_shader = fragment_program_gxm.program.get(mem);
+vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::RenderPass render_pass, const ProgramBinding &vertex_program_binding, const ProgramBinding &fragment_program_binding, const GxmRecordState &record, bool has_color_surface_data, const shader::Hints &hints, MemState &mem) {
+    const VertexProgram &vertex_program = *vertex_program_binding.vertex_program;
+    const SceGxmProgram *gxm_fragment_shader = fragment_program_binding.program();
     const VKFragmentProgram &fragment_program = *reinterpret_cast<VKFragmentProgram *>(
-        fragment_program_gxm.renderer_data.get());
+        fragment_program_binding.fragment_program.get());
 
     // the vertex input state must be computed before shader are retrieved in case symbols are stripped
-    const vk::PipelineVertexInputStateCreateInfo vertex_input = get_vertex_input_state(vertex_program_gxm, mem);
+    const vk::PipelineVertexInputStateCreateInfo vertex_input = get_vertex_input_state(vertex_program_binding);
 
-    const vk::PipelineShaderStageCreateInfo vertex_shader = retrieve_shader(vertex_program_gxm.program.get(mem), vertex_program.hash, true, fragment_program_gxm.is_maskupdate, mem, hints);
-    const vk::PipelineShaderStageCreateInfo fragment_shader = retrieve_shader(gxm_fragment_shader, fragment_program.hash, false, fragment_program_gxm.is_maskupdate, mem, hints, record.is_gamma_corrected);
+    const vk::PipelineShaderStageCreateInfo vertex_shader = retrieve_shader(vertex_program_binding.program(), vertex_program.hash, true, fragment_program_binding.is_maskupdate, mem, hints);
+    const vk::PipelineShaderStageCreateInfo fragment_shader = retrieve_shader(gxm_fragment_shader, fragment_program.hash, false, fragment_program_binding.is_maskupdate, mem, hints, record.is_gamma_corrected);
     const vk::PipelineShaderStageCreateInfo shader_stages[] = { vertex_shader, fragment_shader };
     // disable the fragment shader if gxm asks us to
     const bool is_fragment_disabled = record.front_side_fragment_program_mode == SCE_GXM_FRAGMENT_PROGRAM_DISABLED || gxm_fragment_shader->has_no_effect();
@@ -1135,7 +1133,7 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
     } else {
         blend_attachments[0] = fragment_program.blending;
     }
-    const bool with_raw_attachment = state.features.preserve_f16_nan_as_u16 && !use_shader_interlock && record.color_base_format == SCE_GXM_COLOR_BASE_FORMAT_F16F16F16F16 && record.color_surface.data;
+    const bool with_raw_attachment = state.features.preserve_f16_nan_as_u16 && !use_shader_interlock && record.color_base_format == SCE_GXM_COLOR_BASE_FORMAT_F16F16F16F16 && has_color_surface_data;
     color_blending.attachmentCount = with_raw_attachment ? 2 : 1;
     color_blending.pAttachments = blend_attachments.data();
 
@@ -1384,14 +1382,14 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
     uint64_t key = XXH3_64bits(&record, record_pipeline_len);
 
     // add the hash of the blending
-    SceGxmFragmentProgram &fragment_program_gxm = *record.fragment_program.get(mem);
+    const std::shared_ptr<ProgramBinding> &fragment_program_binding = record.fragment_program_binding;
     const VKFragmentProgram &fragment_program = *reinterpret_cast<VKFragmentProgram *>(
-        fragment_program_gxm.renderer_data.get());
+        fragment_program_binding->fragment_program.get());
     key ^= fragment_program.blending_hash;
 
     // add the hash of the attribute and stream layout
-    SceGxmVertexProgram &vertex_program_gxm = *record.vertex_program.get(mem);
-    key ^= vertex_program_gxm.key_hash;
+    const std::shared_ptr<ProgramBinding> &vertex_program_binding = record.vertex_program_binding;
+    key ^= vertex_program_binding->key_hash;
 
     // and also add the primitive type
     key ^= static_cast<uint64_t>(type);
@@ -1423,12 +1421,12 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
     }
 
     // get the correct renderpass here
-    const SceGxmProgram *gxm_fragment_shader = fragment_program_gxm.program.get(mem);
+    const SceGxmProgram *gxm_fragment_shader = fragment_program_binding->program();
     const bool use_shader_interlock = state.features.support_shader_interlock && gxm_fragment_shader->is_frag_color_used();
     const vk::RenderPass render_pass = use_shader_interlock ? context.current_shader_interlock_pass : context.current_render_pass;
     // update the shader hints
     context.shader_hints.color_format = record.color_surface.colorFormat;
-    context.shader_hints.attributes = &vertex_program_gxm.attributes;
+    context.shader_hints.attributes = &vertex_program_binding->attributes;
 
     constexpr bool log_texture_hint_changes = false; // costs a mutex + map lookup per draw
     if constexpr (log_texture_hint_changes) {
@@ -1474,23 +1472,20 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
             .pipeline = &it->second,
             .type = type,
             .render_pass = render_pass,
-            .vertex_program_gxm = &vertex_program_gxm,
-            .fragment_program_gxm = &fragment_program_gxm,
+            .vertex_program_binding = vertex_program_binding,
+            .fragment_program_binding = fragment_program_binding,
+            .has_color_surface_data = static_cast<bool>(record.color_surface.data),
             .hints = context.shader_hints
         };
         memcpy(request->record_data, &record, record_pipeline_len);
         it->second = pipeline_compiling;
-
-        // we must not delete these programs until the worker is done
-        vertex_program_gxm.compile_threads_on.fetch_add(1, std::memory_order_relaxed);
-        fragment_program_gxm.compile_threads_on.fetch_add(1, std::memory_order_relaxed);
 
         pipeline_compile_queue.enqueue(pipeline_compile_queue_token, request);
 
         return nullptr;
     } else {
         // can't wait, compile it right now
-        vk::Pipeline result = compile_pipeline(type, render_pass, vertex_program_gxm, fragment_program_gxm, record, context.shader_hints, mem);
+        vk::Pipeline result = compile_pipeline(type, render_pass, *vertex_program_binding, *fragment_program_binding, record, static_cast<bool>(record.color_surface.data), context.shader_hints, mem);
 
         const auto time_s = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
         next_pipeline_cache_save = time_s + pipeline_cache_save_delay;

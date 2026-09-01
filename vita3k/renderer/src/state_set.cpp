@@ -15,9 +15,6 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
-#include <array>
-#include <chrono>
-#include <cpu/functions.h>
 #include <gxm/types.h>
 #include <renderer/commands.h>
 #include <renderer/driver_functions.h>
@@ -81,13 +78,25 @@ COMMAND_SET_STATE(region_clip) {
 COMMAND_SET_STATE(program) {
     TRACY_FUNC_COMMANDS_SET_STATE(program);
     const Ptr<void> program = helper.pop<Ptr<void>>();
+    auto *binding_payload = helper.pop<std::shared_ptr<ProgramBinding> *>();
     const bool is_fragment = helper.pop<bool>();
+
+    if (!binding_payload || !*binding_payload) {
+        LOG_ERROR("SetProgram command has no host-side program binding");
+        return;
+    }
+
+    const std::shared_ptr<ProgramBinding> binding = *binding_payload;
+    // Immediate commands execute once. Deferred commands may be linked and executed again, so
+    // their payload is released only when the deferred command list is destroyed.
+    if (!(helper.cmd->flags & Command::FLAG_NO_FREE))
+        delete binding_payload;
 
     if (is_fragment) {
         render_context->record.fragment_program = program.cast<SceGxmFragmentProgram>();
-        const SceGxmFragmentProgram *gxm_program = render_context->record.fragment_program.get(mem);
-        render_context->record.fragment_program_hash = gxm_program->renderer_data->hash;
-        render_context->record.is_maskupdate = gxm_program->is_maskupdate;
+        render_context->record.fragment_program_binding = binding;
+        render_context->record.fragment_program_hash = binding->fragment_program->hash;
+        render_context->record.is_maskupdate = binding->is_maskupdate;
 
         switch (renderer.current_backend) {
         case Backend::OpenGL:
@@ -103,8 +112,8 @@ COMMAND_SET_STATE(program) {
         }
     } else {
         render_context->record.vertex_program = program.cast<SceGxmVertexProgram>();
-        const SceGxmVertexProgram *gxm_program = render_context->record.vertex_program.get(mem);
-        render_context->record.vertex_program_hash = gxm_program->renderer_data->hash;
+        render_context->record.vertex_program_binding = binding;
+        render_context->record.vertex_program_hash = binding->vertex_program->hash;
     }
 
     if (renderer.current_backend == Backend::Vulkan) {
@@ -119,8 +128,8 @@ COMMAND_SET_STATE(uniform_buffer) {
     const int block_num = helper.pop<int>();
     const std::uint32_t size = helper.pop<std::uint32_t>();
 
-    renderer::ShaderProgram *program = is_vertex ? reinterpret_cast<ShaderProgram *>(render_context->record.vertex_program.get(mem)->renderer_data.get())
-                                                 : reinterpret_cast<ShaderProgram *>(render_context->record.fragment_program.get(mem)->renderer_data.get());
+    renderer::ShaderProgram *program = is_vertex ? static_cast<ShaderProgram *>(render_context->record.vertex_program_binding->vertex_program.get())
+                                                 : static_cast<ShaderProgram *>(render_context->record.fragment_program_binding->fragment_program.get());
 
     switch (renderer.current_backend) {
     case Backend::OpenGL:
@@ -561,18 +570,11 @@ COMMAND(handle_set_state) {
         { GXMState::VisibilityIndex, cmd_set_state_visibility_index }
     };
 
-    static const std::array<StateChangeHandlerFunc *, static_cast<size_t>(GXMState::TotalState)> handler_table = [&]() {
-        std::array<StateChangeHandlerFunc *, static_cast<size_t>(GXMState::TotalState)> table{};
-        for (const auto &[state, fn] : handlers)
-            table[static_cast<size_t>(state)] = fn;
-        return table;
-    }();
+    auto result = handlers.find(gxm_state_to_set);
 
-    const size_t state_index = static_cast<size_t>(gxm_state_to_set);
-    StateChangeHandlerFunc *fn = state_index < handler_table.size() ? handler_table[state_index] : nullptr;
-
-    if (fn) {
-        fn(renderer, mem, config, helper, render_context);
+    if (result != handlers.end()) {
+        // LOG_TRACE("State set: {}", (int)gxm_state_to_set);
+        result->second(renderer, mem, config, helper, render_context);
     } else {
         LOG_ERROR("Unknown state set command {}", static_cast<uint16_t>(gxm_state_to_set));
     }

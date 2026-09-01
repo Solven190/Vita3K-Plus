@@ -179,8 +179,8 @@ static void draw_bind_descriptors(VKContext &context, MemState &mem) {
     descriptors[0] = context.global_set;
     descriptors[1] = context.rendertarget_set;
 
-    const uint16_t vertex_textures_count = context.record.vertex_program.get(mem)->renderer_data->texture_count;
-    const uint16_t fragment_texture_count = context.record.fragment_program.get(mem)->renderer_data->texture_count;
+    const uint16_t vertex_textures_count = context.record.vertex_program_binding->vertex_program->texture_count;
+    const uint16_t fragment_texture_count = context.record.fragment_program_binding->fragment_program->texture_count;
 
     vk::PipelineLayout pipeline_layout = state.pipeline_cache.pipeline_layouts[vertex_textures_count][fragment_texture_count];
 
@@ -259,8 +259,8 @@ static void draw_bind_descriptors(VKContext &context, MemState &mem) {
 // vertex count is only used with double buffer mapping
 static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t instance_count, uint32_t max_index) {
     GxmRecordState &state = context.record;
-    const SceGxmVertexProgram &vertex_program = *state.vertex_program.get(mem);
-    VertexProgram *vkvert = vertex_program.renderer_data.get();
+    const ProgramBinding &vertex_program = *state.vertex_program_binding;
+    VertexProgram *vkvert = vertex_program.vertex_program.get();
 
     int max_stream_idx = -1;
 
@@ -334,17 +334,17 @@ static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t inst
 void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format,
     Ptr<void> indices, size_t count, uint32_t instance_count, MemState &mem, const Config &config) {
     // the mask bit is not emulated here, so a mask-update program would just paint writing_mask over the whole target (gl/draw.cpp skips these too)
-    if (!context.state.features.use_mask_bit && context.record.fragment_program.get(mem)->is_maskupdate)
+    if (!context.state.features.use_mask_bit && context.record.fragment_program_binding->is_maskupdate)
         return;
 
     // DOA5 black clothes fix:
     {
-        const SceGxmVertexProgram *gxm_vp = context.record.vertex_program.get(mem);
-        if (gxm_vp && gxm_vp->renderer_data) {
-            VertexProgram *vp_data = gxm_vp->renderer_data.get();
+        const std::shared_ptr<ProgramBinding> &vertex_binding = context.record.vertex_program_binding;
+        if (vertex_binding && vertex_binding->vertex_program) {
+            VertexProgram *vp_data = vertex_binding->vertex_program.get();
             if (vp_data->varying_location_mask == 0xFFFFFFFFu) {
                 uint32_t written_mask = 0;
-                const SceGxmProgram *vp_gxp = gxm_vp->program.get(mem);
+                const SceGxmProgram *vp_gxp = vertex_binding->program();
                 if (vp_gxp) {
                     const SceGxmVertexProgramOutputs vo_mask = gxp::get_vertex_outputs(*vp_gxp);
                     static constexpr struct {
@@ -379,8 +379,8 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     // record queued casted-texture copies BEFORE marking the draw, so the placement decision
     // sees whether this scene had drawn prior to this draw
     {
-        const uint16_t vert_texture_count = context.record.vertex_program.get(mem)->renderer_data->texture_count;
-        const uint16_t frag_texture_count = context.record.fragment_program.get(mem)->renderer_data->texture_count;
+        const uint16_t vert_texture_count = context.record.vertex_program_binding->vertex_program->texture_count;
+        const uint16_t frag_texture_count = context.record.fragment_program_binding->fragment_program->texture_count;
         context.state.surface_cache.perform_pending_casts(context, vert_texture_count, frag_texture_count);
     }
     {
@@ -417,11 +417,11 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
         context.is_first_scene_draw = false;
     }
 
-    const SceGxmFragmentProgram &gxm_fragment_program = *context.record.fragment_program.get(mem);
-    const SceGxmProgram &fragment_program_gxp = *gxm_fragment_program.program.get(mem);
+    const ProgramBinding &fragment_program = *context.record.fragment_program_binding;
+    const SceGxmProgram &fragment_program_gxp = *fragment_program.program();
 
     if (context.state.features.preserve_f16_nan_as_u16) {
-        const VKFragmentProgram &vk_frag_program = *reinterpret_cast<VKFragmentProgram *>(gxm_fragment_program.renderer_data.get());
+        const VKFragmentProgram &vk_frag_program = *reinterpret_cast<VKFragmentProgram *>(fragment_program.fragment_program.get());
         if (vk_frag_program.blending.blendEnable)
             context.state.surface_cache.mark_current_surface_blended();
     }
@@ -493,8 +493,8 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
         return;
 
     if (config.log_active_shaders) {
-        const std::string hash_text_f = hex_string(context.record.fragment_program.get(mem)->renderer_data->hash);
-        const std::string hash_text_v = hex_string(context.record.vertex_program.get(mem)->renderer_data->hash);
+        const std::string hash_text_f = hex_string(context.record.fragment_program_binding->fragment_program->hash);
+        const std::string hash_text_v = hex_string(context.record.vertex_program_binding->vertex_program->hash);
 
         LOG_DEBUG("\nVertex  : {}\nFragment: {}", hash_text_v, hash_text_f);
         LOG_DEBUG("Vertex default uniform buffer: {}\n", spdlog::to_hex(context.ubo_data[0], 16));
@@ -505,8 +505,8 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
 
     // update uniforms if needed
     // first update the buffer and texture count
-    auto &vert_render_data = context.record.vertex_program.get(mem)->renderer_data;
-    auto &frag_render_data = context.record.fragment_program.get(mem)->renderer_data;
+    const auto &vert_render_data = context.record.vertex_program_binding->vertex_program;
+    const auto &frag_render_data = context.record.fragment_program_binding->fragment_program;
 
     if (use_memory_mapping) {
         context.curr_vert_ublock.set_buffer_count(vert_render_data->buffer_count);
