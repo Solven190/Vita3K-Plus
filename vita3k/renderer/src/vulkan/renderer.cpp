@@ -1505,8 +1505,8 @@ void VKState::swap_window() {
     frames_presented++;
     if (time_s >= next_heartbeat) {
         if (next_heartbeat != 0) {
-            LOG_DEBUG("renderer heartbeat: {} frames presented, pipelines created={} failed={}",
-                frames_presented, pipeline_cache.pipelines_created.load(), pipeline_cache.pipelines_failed.load());
+            LOG_DEBUG("renderer heartbeat: {} frames presented, pipelines created={} failed={} keys={}",
+                frames_presented, pipeline_cache.pipelines_created.load(), pipeline_cache.pipelines_failed.load(), pipeline_cache.pipeline_key_count());
             mem_diag::log_memory_snapshot("heartbeat");
         }
         next_heartbeat = time_s + 5;

@@ -201,6 +201,8 @@ struct KernelState {
     std::atomic<int64_t> last_world_stop_epoch_ms{ 0 };
     // Last resort recovery for a full deadlock (called by the hang watchdog)
     int try_break_frame_sync_deadlock(std::vector<SceUID> &already_nudged);
+    // Anti-freeze recovery - wake every condvar waiter in the system!
+    int nudge_all_condvar_waiters();
 
     std::atomic<uint64_t> thread_wake_counter{ 0 };
 

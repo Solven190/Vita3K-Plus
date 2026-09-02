@@ -160,7 +160,8 @@ EXPORT(SceInt32, _sceDisplaySetFrameBuf, const SceDisplayFrameBuf *pFrameBuf, Sc
     emuenv.frame_count++;
 
     const uint64_t nflip = emuenv.display.setframe_accept_count.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (nflip <= 8)
+    constexpr bool log_first_flips = false;
+    if (log_first_flips && nflip <= 8)
         LOG_INFO("[FLIPTRACE] flip #{}: base=0x{:X} {}x{} pitch={} sync={} at vblank {}", nflip, pFrameBuf->base.address(),
             pFrameBuf->width, pFrameBuf->height, pFrameBuf->pitch, static_cast<int>(sync), emuenv.display.vblank_count.load());
 

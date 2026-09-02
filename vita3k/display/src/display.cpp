@@ -183,6 +183,7 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
             static uint64_t last_progress_value = 0;
             static uint64_t last_progress_change_vblank = 0;
             static std::vector<SceUID> nudged_this_stall;
+            static int break_dumps_this_stall = 0;
             static uint64_t last_wake_value = 0;
             static uint64_t last_wake_change_vblank = 0;
             static bool never_flip_redumped = false;
@@ -227,7 +228,9 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
             const uint64_t renderer_idle_vblanks = vblanks - last_progress_change_vblank;
             const uint64_t guest_idle_vblanks = vblanks - last_wake_change_vblank;
 
-            if (unpaused && vblanks > 0 && (vblanks % 600) == 0)
+            // Flip tracing - only us while chasing a freeze
+            constexpr bool log_flip_trace = false;
+            if (log_flip_trace && unpaused && vblanks > 0 && (vblanks % 600) == 0)
                 LOG_INFO("[FLIPTRACE] vblank={} SetFrameBuf calls={} accepted={} queue: entries_done={} depth={} worker_state={} renderer_progress={}",
                     vblanks, emuenv.display.setframe_call_count.load(), emuenv.display.setframe_accept_count.load(),
                     emuenv.gxm.display_entries_done.load(), emuenv.gxm.display_queue.size(), emuenv.gxm.display_worker_state.load(),
@@ -256,7 +259,7 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
             constexpr uint32_t STUCK_SCENE_MAX_PIPELINES = 32;
             constexpr uint64_t STUCK_SCENE_FROZEN_VBLANKS = 720;
             constexpr uint64_t STUCK_SCENE_REDUMP_VBLANKS = 600;
-            constexpr int STUCK_SCENE_MAX_DUMPS = 6;
+            constexpr int STUCK_SCENE_MAX_DUMPS = 1;
             const uint32_t pipes_now = emuenv.renderer ? emuenv.renderer->diag_pipelines_created() : ~0u;
             const bool pipes_tracked = (pipes_now != ~0u);
             if (pipes_now != last_pipes_value) {
@@ -296,7 +299,7 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
             }
             if (!never_flipped && stall_vblanks > PROVABLE_BREAK_VBLANKS && unpaused && renderer_idle_vblanks > PROVABLE_BREAK_VBLANKS && world_stop_quiet && mem_transition_quiet && last_provable_break_setframe != setframe) {
 #ifdef _WIN32
-                if (!IsDebuggerPresent())
+                // if (!IsDebuggerPresent())  // Debug speed can make a normal load look exactly like a wedge hang
 #endif
                 {
                     const int broken = emuenv.kernel.try_break_provable_evf_cycle();
@@ -318,25 +321,36 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
                 if (!full_wedge && !partial_wedge) {
                     LOG_WARN("HANG WATCHDOG: no flip for {} vblanks but still alive (renderer executed a command {} vblanks ago, a guest thread woke {} vblanks ago) — breaker suppressed", stall_vblanks, renderer_idle_vblanks, guest_idle_vblanks);
                 } else {
-                    // dump BEFORE mutating anything so the log always records what was stuck on what
-                    LOG_ERROR("HANG WATCHDOG: no flip for {} vblanks, renderer idle {}, guest wake-idle {} — dumping guest threads, then breaking", stall_vblanks, renderer_idle_vblanks, guest_idle_vblanks);
-                    emuenv.kernel.log_thread_hang_dump();
+                    constexpr int MAX_BREAK_DUMPS_PER_STALL = 3;
+                    if (break_dumps_this_stall < MAX_BREAK_DUMPS_PER_STALL) {
+                        ++break_dumps_this_stall;
+                        LOG_ERROR("HANG WATCHDOG: no flip for {} vblanks, renderer idle {}, guest wake-idle {} — dumping guest threads ({}/{}), then breaking", stall_vblanks, renderer_idle_vblanks, guest_idle_vblanks, break_dumps_this_stall, MAX_BREAK_DUMPS_PER_STALL);
+                        emuenv.kernel.log_thread_hang_dump();
+                    } else if (break_dumps_this_stall == MAX_BREAK_DUMPS_PER_STALL) {
+                        ++break_dumps_this_stall;
+                        LOG_ERROR("HANG WATCHDOG: no flip for {} vblanks — further thread dumps suppressed for this stall", stall_vblanks);
+                    }
 #ifdef _WIN32
-                    // Debug speed makes a normal load look exactly like a wedge hang
-                    if (IsDebuggerPresent()) {
+                    // Debug speed can make a normal load look exactly like a wedge hang
+                    /* if (IsDebuggerPresent()) {
                         LOG_ERROR("HANG WATCHDOG: breaker SUPPRESSED - debugger attached; heuristics must not mutate guest state under a human. Break in and inspect instead.");
                         continue;
-                    }
+                    }*/
 #endif
                     const int nudged = emuenv.kernel.try_break_frame_sync_deadlock(nudged_this_stall);
-                    if (nudged > 0)
+                    if (nudged > 0) {
                         LOG_ERROR("HANG WATCHDOG: deadlock breaker nudged {} stuck event flag(s) after {} vblanks stalled", nudged, stall_vblanks);
-                    else
-                        LOG_ERROR("HANG WATCHDOG: genuine-looking stall but nothing to nudge ({} flag(s) already nudged this stall)", nudged_this_stall.size());
+                    } else {
+                        // No stuck event flag to nudge. Try the condvar path.
+                        const int woke = emuenv.kernel.nudge_all_condvar_waiters();
+                        if (woke == 0)
+                            LOG_ERROR("HANG WATCHDOG: genuine-looking stall but nothing to nudge ({} flag(s) already nudged this stall, 0 condvar waiters)", nudged_this_stall.size());
+                    }
                 }
             }
             if (stall_vblanks == 0) {
                 last_break_vblanks = 0;
+                break_dumps_this_stall = 0;
                 nudged_this_stall.clear();
             }
         }

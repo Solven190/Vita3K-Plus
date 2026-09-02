@@ -134,6 +134,8 @@ private:
     vk::Pipeline compile_pipeline(SceGxmPrimitiveType type, vk::RenderPass render_pass, const ProgramBinding &vertex_program_binding, const ProgramBinding &fragment_program_binding, const GxmRecordState &record, bool has_color_surface_data, const shader::Hints &hints, MemState &mem);
 
 public:
+    size_t pipeline_key_count() const { return pipelines.size(); }
+
     // if not 0, next time the pipeline cache should be saved (in seconds since epoch)
     uint64_t next_pipeline_cache_save = std::numeric_limits<uint64_t>::max();
 

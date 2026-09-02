@@ -1067,8 +1067,7 @@ static int delay_thread(KernelState &kernel, SceUID thread_id, SceUInt delay_us)
     const ThreadStatePtr thread = kernel.get_thread(thread_id);
     std::unique_lock<std::mutex> lock(thread->mutex);
     thread->update_status(ThreadStatus::wait);
-    thread->status_cond.wait_for(lock, std::chrono::microseconds(delay_us),
-        [&] { return thread->status == ThreadStatus::run; });
+    thread->wait_for_run_precise(lock, static_cast<int64_t>(delay_us));
     if (thread->status != ThreadStatus::run)
         thread->update_status(ThreadStatus::run);
     return SCE_KERNEL_OK;

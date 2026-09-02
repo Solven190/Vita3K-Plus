@@ -15,6 +15,8 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+#include <atomic>
+#include <chrono>
 #include <exception>
 #include <typeinfo>
 #include <util/fork_build.h>
@@ -206,6 +208,31 @@ void rebuild_default_logger() {
 #ifdef _WIN32
 static LONG WINAPI exception_handler(PEXCEPTION_POINTERS pExp) noexcept {
     const unsigned ec = pExp->ExceptionRecord->ExceptionCode;
+
+    static std::atomic<int64_t> window_start_ms{ 0 };
+    static std::atomic<uint32_t> in_window{ 0 };
+    static std::atomic<uint64_t> suppressed{ 0 };
+    constexpr uint32_t MAX_PER_WINDOW = 32;
+    constexpr int64_t WINDOW_MS = 5000;
+
+    const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch())
+                               .count();
+    int64_t started = window_start_ms.load(std::memory_order_relaxed);
+    if (now_ms - started >= WINDOW_MS
+        && window_start_ms.compare_exchange_strong(started, now_ms, std::memory_order_relaxed)) {
+        const uint64_t dropped = suppressed.exchange(0, std::memory_order_relaxed);
+        in_window.store(0, std::memory_order_relaxed);
+        if (dropped)
+            LOG_CRITICAL("Suppressed {} further exception report(s) in the previous 5s window", dropped);
+    }
+    const uint32_t seen = in_window.fetch_add(1, std::memory_order_relaxed);
+    if (seen >= MAX_PER_WINDOW) {
+        suppressed.fetch_add(1, std::memory_order_relaxed);
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    const bool should_flush = seen < 4;
+
     switch (ec) {
     case EXCEPTION_ACCESS_VIOLATION:
         LOG_CRITICAL("Exception EXCEPTION_ACCESS_VIOLATION ({}). ", log_hex(ec));
@@ -250,7 +277,8 @@ static LONG WINAPI exception_handler(PEXCEPTION_POINTERS pExp) noexcept {
     default:
         return EXCEPTION_CONTINUE_SEARCH;
     }
-    flush();
+    if (should_flush)
+        flush();
     return EXCEPTION_CONTINUE_SEARCH;
 }
 

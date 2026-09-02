@@ -37,6 +37,7 @@ extern thread_local ThreadState *g_tls_guest_thread;
 
 void guest_sched_set_cores(int cores);
 void guest_sched_release_for_block();
+void request_precise_host_timer();
 void guest_sched_forget_cpu(CPUState *cpu);
 CPUState *guest_sched_token_cpu();
 struct ThreadParams;
@@ -105,6 +106,7 @@ struct ThreadState {
     ThreadSignal signal;
     std::vector<CallbackPtr> callbacks;
     std::condition_variable status_cond;
+    bool wait_for_run_precise(std::unique_lock<std::mutex> &lock, int64_t timeout_us);
     std::vector<std::shared_ptr<ThreadState>> waiting_threads;
     uint32_t returned_value = 0;
 
@@ -159,6 +161,8 @@ private:
     bool suspend_requested = false;
     // Suspended by sceKernelSuspendThreadForVM
     bool vm_suspended = false;
+    // Suspended deliberately from outside all the world-stop machinery
+    bool external_suspend = false;
     // Stop-the-world
     bool world_stop_requested = false;
     bool world_stopped = false;

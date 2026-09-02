@@ -30,6 +30,21 @@
 #include <cassert>
 #include <chrono>
 #include <condition_variable>
+#include <thread>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <timeapi.h>
+#include <windows.h>
+#pragma comment(lib, "winmm.lib")
+#endif
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+#include <intrin.h>
+#endif
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -52,6 +67,25 @@ bool ThreadSignal::send() {
     signaled = true;
     recv_cond.notify_one();
     return true;
+}
+
+void request_precise_host_timer() {
+#ifdef _WIN32
+    static bool done = false;
+    if (done)
+        return;
+    done = true;
+    if (timeBeginPeriod(1) == TIMERR_NOERROR)
+        LOG_INFO("[TIMEDWAIT] requested 1ms host timer resolution (timeBeginPeriod): guest timed waits now have ~1ms granularity instead of the 15.6ms default");
+    else
+        LOG_WARN("[TIMEDWAIT] timeBeginPeriod(1) failed; short guest waits keep the default host timer granularity");
+#endif
+}
+
+bool ThreadState::wait_for_run_precise(std::unique_lock<std::mutex> &lock, int64_t timeout_us) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(timeout_us);
+    const auto woken = [&] { return status == ThreadStatus::run; };
+    return status_cond.wait_until(lock, deadline, woken);
 }
 
 int ThreadState::init(const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, const SceKernelThreadOptParam *option = nullptr) {
@@ -202,7 +236,7 @@ void ThreadState::exit_delete(bool exit) {
 namespace {
 std::mutex g_sched_mutex;
 std::condition_variable g_sched_cv;
-constexpr size_t GUEST_CORES_MAX = 4;
+constexpr size_t GUEST_CORES_MAX = 8;
 constexpr auto SCHED_DEADLINE_WINDOW = std::chrono::milliseconds(2);
 constexpr auto SCHED_MIN_SLICE = std::chrono::microseconds(50);
 constexpr auto SCHED_TIMESLICE = std::chrono::microseconds(250);
@@ -314,11 +348,14 @@ void sched_acquire(int priority, SceInt32 affinity_mask, bool enabled, CPUState 
     waiter_add(priority);
 
     auto preempt_lower = [&](const std::chrono::steady_clock::time_point now) {
+        Holder *victim = nullptr;
         for (auto &h : g_sched_holders) {
-            if (h.cpu && h.priority > priority && now - h.since >= SCHED_MIN_SLICE) {
-                stop(*h.cpu);
-                g_sched_preempts.fetch_add(1, std::memory_order_relaxed);
-            }
+            if (h.cpu && h.priority > priority && now - h.since >= SCHED_MIN_SLICE && (!victim || h.priority > victim->priority))
+                victim = &h;
+        }
+        if (victim) {
+            stop(*victim->cpu);
+            g_sched_preempts.fetch_add(1, std::memory_order_relaxed);
         }
     };
     preempt_lower(start);
@@ -411,7 +448,7 @@ void sched_maybe_yield(SceInt32 affinity_mask, bool enabled, CPUState *cpu) {
 
 void guest_sched_set_cores(int cores) {
     const std::lock_guard<std::mutex> lock(g_sched_mutex);
-    g_sched_cores = std::clamp(cores, 1, static_cast<int>(GUEST_CORES_MAX));
+    g_sched_cores = std::clamp(cores, 1, 4); // the Vita has four cores, three for the application
     if (g_sched_cores != cores)
         LOG_WARN("[GUEST-SCHED] guest-cores {} out of range, using {}", cores, g_sched_cores);
     LOG_INFO("[GUEST-SCHED] gate will run at most {} guest thread(s) at a time", g_sched_cores);
@@ -777,6 +814,7 @@ void ThreadState::suspend() {
     {
         const std::lock_guard<std::mutex> lock(mutex);
         suspend_requested = true;
+        external_suspend = true;
     }
     stop(*cpu);
 }
@@ -785,6 +823,7 @@ void ThreadState::suspend_and_wait() {
     guest_sched_release_for_block();
     std::unique_lock<std::mutex> lock(mutex);
     vm_suspended = true;
+    external_suspend = true;
 
     if (status != ThreadStatus::run)
         return;
@@ -804,6 +843,7 @@ void ThreadState::resume(bool step) {
     {
         const std::lock_guard<std::mutex> lock(mutex);
         single_stepping = step;
+        external_suspend = false;
         update_status(ThreadStatus::run);
     }
 }
@@ -811,6 +851,7 @@ void ThreadState::resume(bool step) {
 void ThreadState::resume_if_suspended() {
     const std::lock_guard<std::mutex> lock(mutex);
     vm_suspended = false;
+    external_suspend = false;
     suspend_requested = false;
     if (status == ThreadStatus::suspend)
         update_status(ThreadStatus::run);
@@ -836,15 +877,27 @@ bool ThreadState::wait_world_stopped(std::chrono::steady_clock::time_point deadl
 
 bool ThreadState::resume_from_world() {
     const std::lock_guard<std::mutex> lock(mutex);
+    // We asked this thread to stop, so anything we set on it is ours to clear.
+    const bool we_requested = world_stop_requested;
     world_stop_requested = false;
-    suspend_requested = false;
-    if (world_stopped) {
-        world_stopped = false;
-        // Only wake threads WE parked; leave ForVM/debugger suspensions untouched.
-        if (status == ThreadStatus::suspend && !vm_suspended) {
-            update_status(ThreadStatus::run);
-            return true;
-        }
+    if (we_requested)
+        suspend_requested = false;
+    const bool parked_by_us = world_stopped;
+    world_stopped = false;
+
+    // Never touch a suspension that did not come from us.
+    if (vm_suspended || external_suspend)
+        return false;
+
+    if (parked_by_us && status == ThreadStatus::suspend) {
+        update_status(ThreadStatus::run);
+        return true;
+    }
+
+    if (we_requested && status == ThreadStatus::suspend) {
+        LOG_ERROR("[WORLDSTOP] thread '{}' ({}) was left suspended after a world stop without world_stopped set - resuming it (this would otherwise be a permanent freeze)", name, id);
+        update_status(ThreadStatus::run);
+        return true;
     }
     return false;
 }

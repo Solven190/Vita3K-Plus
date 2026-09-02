@@ -163,20 +163,39 @@ bool is_valid_addr_range(const MemState &state, Address start, Address end) {
     return state.allocator.free_slot_count(start_page, end_page) == 0;
 }
 
+static inline uint8_t *debug_host_ptr(const MemState &state, Address addr) {
+    return state.use_page_table ? (state.page_table[addr / 4096u] + addr) : (&state.memory[addr]);
+}
+
+static void debug_copy_by_page(const MemState &state, Address addr, uint8_t *dst, const uint8_t *src, uint32_t size, bool to_guest) {
+    uint32_t done = 0;
+    while (done < size) {
+        const Address cur = addr + done;
+        const uint32_t in_page = 4096u - (cur & 4095u);
+        const uint32_t chunk = std::min(in_page, size - done);
+        uint8_t *host = debug_host_ptr(state, cur);
+        if (to_guest)
+            memcpy(host, src + done, chunk);
+        else
+            memcpy(dst + done, host, chunk);
+        done += chunk;
+    }
+}
+
 bool debug_safe_copy_guest(const MemState &state, Address addr, void *dst, uint32_t size) {
     if (!addr || addr + size < addr)
         return false;
+    if (!is_valid_addr_range(state, addr, addr + size))
+        return false;
 #ifdef _WIN32
     __try {
-        memcpy(dst, &state.memory[addr], size);
+        debug_copy_by_page(state, addr, static_cast<uint8_t *>(dst), nullptr, size, false);
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
 #else
-    if (!is_valid_addr_range(state, addr, addr + size))
-        return false;
-    memcpy(dst, &state.memory[addr], size);
+    debug_copy_by_page(state, addr, static_cast<uint8_t *>(dst), nullptr, size, false);
     return true;
 #endif
 }
@@ -184,17 +203,17 @@ bool debug_safe_copy_guest(const MemState &state, Address addr, void *dst, uint3
 bool debug_safe_write_guest(MemState &state, Address addr, const void *src, uint32_t size) {
     if (!addr || addr + size < addr)
         return false;
+    if (!is_valid_addr_range(state, addr, addr + size))
+        return false;
 #ifdef _WIN32
     __try {
-        memcpy(&state.memory[addr], src, size);
+        debug_copy_by_page(state, addr, nullptr, static_cast<const uint8_t *>(src), size, true);
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
 #else
-    if (!is_valid_addr_range(state, addr, addr + size))
-        return false;
-    memcpy(&state.memory[addr], src, size);
+    debug_copy_by_page(state, addr, nullptr, static_cast<const uint8_t *>(src), size, true);
     return true;
 #endif
 }

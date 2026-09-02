@@ -1632,17 +1632,26 @@ private fun EmulatorSettingsSection(
                 title = browseTitle,
                 value = stringResource(R.string.settings_emulator_browse_files_value),
                 onClick = {
-                    val rootUri = DocumentsContract.buildRootUri(
-                        "${browseContext.packageName}.documents", VitaDocumentsProvider.ROOT_ID
+                    val authority = VitaDocumentsProvider.authority(browseContext)
+                    val candidates = listOf(
+                        Intent(Intent.ACTION_VIEW)
+                            .setDataAndType(
+                                DocumentsContract.buildRootUri(authority, VitaDocumentsProvider.ROOT_ID),
+                                DocumentsContract.Root.MIME_TYPE_ITEM
+                            )
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                        Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
+                            .putExtra(
+                                DocumentsContract.EXTRA_INITIAL_URI,
+                                DocumentsContract.buildDocumentUri(authority, VitaDocumentsProvider.DOC_ROOT)
+                            )
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     )
-                    val intent = Intent(Intent.ACTION_VIEW)
-                        .setDataAndType(rootUri, DocumentsContract.Root.MIME_TYPE_ITEM)
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    try {
-                        browseContext.startActivity(intent)
-                    } catch (_: ActivityNotFoundException) {
-                        Toast.makeText(browseContext, browseUnavailable, Toast.LENGTH_LONG).show()
+                    val launched = candidates.any { intent ->
+                        runCatching { browseContext.startActivity(intent) }.isSuccess
                     }
+                    if (!launched)
+                        Toast.makeText(browseContext, browseUnavailable, Toast.LENGTH_LONG).show()
                 },
                 help = SettingsHelpEntry(
                     title = browseTitle,

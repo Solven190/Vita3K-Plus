@@ -26,6 +26,8 @@
 #include <kernel/thread/thread_state.h>
 
 #include <cpu/functions.h>
+#include <cstring>
+#include <kernel/sync_primitives.h>
 #include <mem/ptr.h>
 #include <util/lock_and_find.h>
 #include <util/log.h>
@@ -99,6 +101,7 @@ KernelState::KernelState()
 
 bool KernelState::init(MemState &mem, const CallImportFunc &call_import, bool cpu_opt) {
     corenum_allocator.set_max_core_count(MAX_CORE_COUNT);
+    request_precise_host_timer();
 
     start_tick = rtc_get_ticks(rtc_base_ticks());
     base_tick = { rtc_base_ticks() };
@@ -270,6 +273,63 @@ int KernelState::stop_world(SceUID except_id, std::chrono::milliseconds budget) 
     return not_parked;
 }
 
+static std::string describe_wait_target(KernelState &kernel, MemState &mem, const ThreadStatePtr &t) {
+    const char *kind = t->wait_prim_kind;
+    if (!kind)
+        return {};
+    const SceUID uid = t->wait_prim_uid;
+
+    const auto describe_mutex = [&](const MutexPtr &m, const char *label) {
+        std::unique_lock<std::mutex> guard(m->mutex, std::try_to_lock);
+        const std::string waiters = (guard.owns_lock() && m->waiting_threads)
+            ? std::to_string(m->waiting_threads->size())
+            : std::string(guard.owns_lock() ? "0" : "?(busy)");
+        std::string out = fmt::format("    [{} #{}] host lock_count={} owner={} waiters={}",
+            label, uid, m->lock_count,
+            m->owner ? fmt::format("{} ({})", m->owner->id, m->owner->name) : std::string("NONE"),
+            waiters);
+        if (m->lock_count > 0 && !m->owner)
+            out += "  <== HELD WITH NO OWNER (host bookkeeping broke)";
+        if (m->workarea) {
+            if (const SceKernelLwMutexWork *w = m->workarea.get(mem)) {
+                out += fmt::format("\n    [{} #{}] guest workarea owner={} lockCount={}",
+                    label, uid, w->owner, w->lockCount);
+                if (m->lock_count > 0 && w->lockCount == 0)
+                    out += "  <== HOST HELD BUT GUEST RELEASED IT (lwmutex desync)";
+            }
+        }
+        return out;
+    };
+
+    if (std::strcmp(kind, "mutex") == 0) {
+        if (const auto it = kernel.mutexes.find(uid); it != kernel.mutexes.end())
+            return describe_mutex(it->second, "mutex");
+        if (const auto it = kernel.lwmutexes.find(uid); it != kernel.lwmutexes.end())
+            return describe_mutex(it->second, "lwmutex");
+        return fmt::format("    [mutex #{}] NOT FOUND in either mutex map", uid);
+    }
+
+    if (std::strcmp(kind, "cond") == 0) {
+        const auto describe_cond = [&](const CondvarPtr &c, const char *label) {
+            std::unique_lock<std::mutex> cguard(c->mutex, std::try_to_lock);
+            const std::string cw = (cguard.owns_lock() && c->waiting_threads)
+                ? std::to_string(c->waiting_threads->size())
+                : std::string(cguard.owns_lock() ? "0" : "?(busy)");
+            std::string out = fmt::format("    [{} #{}] waiters={}", label, uid, cw);
+            if (c->associated_mutex)
+                out += "\n" + describe_mutex(c->associated_mutex, "  assoc mutex");
+            return out;
+        };
+        if (const auto it = kernel.condvars.find(uid); it != kernel.condvars.end())
+            return describe_cond(it->second, "cond");
+        if (const auto it = kernel.lwcondvars.find(uid); it != kernel.lwcondvars.end())
+            return describe_cond(it->second, "lwcond");
+        return fmt::format("    [cond #{}] NOT FOUND in either condvar map", uid);
+    }
+
+    return {};
+}
+
 void KernelState::log_thread_hang_dump() {
     std::vector<ThreadStatePtr> snapshot;
     {
@@ -300,9 +360,78 @@ void KernelState::log_thread_hang_dump() {
         } else {
             line = fmt::format("thread {} ({}) status={} PC=0x{:X} LR=0x{:X} last_import_nid=0x{:08X} import_lr=0x{:X} stack:\n{}", t->name, t->id, status_str, read_pc(*t->cpu), read_lr(*t->cpu), t->last_import_nid, t->last_import_lr, t->log_stack_traceback())
                 + fmt::format(" waiting_on={}#{} extra=0x{:X}", t->wait_prim_kind ? t->wait_prim_kind : "?", t->wait_prim_uid, t->wait_extra);
+            if (const std::string target = describe_wait_target(*this, t->get_mem(), t); !target.empty())
+                line += "\n" + target;
+            {
+                const MemState &tmem = t->get_mem();
+                uint32_t rv[13];
+                std::string regs = "\n    regs:";
+                for (int ri = 0; ri <= 12; ri++) {
+                    rv[ri] = read_reg(*t->cpu, ri);
+                    regs += fmt::format(" r{}=0x{:X}", ri, rv[ri]);
+                }
+                regs += fmt::format(" sp=0x{:X} lr=0x{:X}", read_sp(*t->cpu), read_lr(*t->cpu));
+                line += regs;
+                const auto dump_words = [&](uint32_t addr, int nwords, const std::string &label) {
+                    std::vector<uint32_t> w(static_cast<size_t>(nwords));
+                    if (addr < 0x1000 || (addr & 3) || !debug_safe_copy_guest(tmem, addr, w.data(), static_cast<uint32_t>(nwords * 4)))
+                        return false;
+                    line += fmt::format("\n    {} @0x{:X}:", label, addr);
+                    for (int k = 0; k < nwords; k++)
+                        line += fmt::format(" {:08X}", w[k]);
+                    return true;
+                };
+                for (int ri = 4; ri <= 10; ri++)
+                    dump_words(rv[ri], 16, fmt::format("r{}", ri));
+                std::vector<uint32_t> fpw(64);
+                if (rv[11] >= 0x1000 && !(rv[11] & 3) && debug_safe_copy_guest(tmem, rv[11], fpw.data(), 256)) {
+                    dump_words(rv[11], 64, "fp");
+                    int shown = 0;
+                    for (int k = 0; k < 64 && shown < 12; k++) {
+                        if (fpw[k] >= 0x1000 && !(fpw[k] & 3) && dump_words(fpw[k], 28, fmt::format("fp+0x{:X}->", k * 4)))
+                            shown++;
+                    }
+                }
+            }
         }
         LOG_ERROR("HANG DUMP: {}", line);
         dump += line + "\n";
+    }
+
+    // Lock-cycle detector
+    {
+        const auto is_lock_import = [](uint32_t nid) {
+            return nid == 0x1D8D7945u /* sceKernelLockMutex */ || nid == 0x2BDAA524u /* sceKernelLockMutexCB */
+                || nid == 0x46E7BE7Bu /* sceKernelLockLwMutex */ || nid == 0x3148C6B6u /* sceKernelLockLwMutexCB */;
+        };
+        const auto owner_of = [&](const ThreadStatePtr &t) -> ThreadStatePtr {
+            if (!t->wait_prim_kind || std::strcmp(t->wait_prim_kind, "mutex") != 0 || t->status != ThreadStatus::wait || !is_lock_import(t->last_import_nid))
+                return nullptr;
+            const std::lock_guard<std::mutex> lock(mutex);
+            if (const auto it = mutexes.find(t->wait_prim_uid); it != mutexes.end() && it->second->lock_count > 0)
+                return it->second->owner;
+            if (const auto it = lwmutexes.find(t->wait_prim_uid); it != lwmutexes.end() && it->second->lock_count > 0)
+                return it->second->owner;
+            return nullptr;
+        };
+        for (const auto &t : snapshot) {
+            ThreadStatePtr cur = owner_of(t);
+            if (!cur)
+                continue;
+            std::string ring = fmt::format("{} ({}) waits mutex#{}", t->name, t->id, t->wait_prim_uid);
+            for (int hops = 0; cur && hops < 8; ++hops) {
+                ring += fmt::format(" held by {} ({})", cur->name, cur->id);
+                if (cur->id == t->id) {
+                    LOG_ERROR("HANG DUMP: LOCK CYCLE: {}", ring);
+                    dump += "LOCK CYCLE: " + ring + "\n";
+                    break;
+                }
+                const ThreadStatePtr next = owner_of(cur);
+                if (next)
+                    ring += fmt::format(", which waits mutex#{}", cur->wait_prim_uid);
+                cur = next;
+            }
+        }
     }
 
     // vita3k.log is truncated on relaunch, so also persist the dump where a restart cannot eat it

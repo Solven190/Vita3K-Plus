@@ -1212,6 +1212,25 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
         }
 
         pipelines_created++;
+        {
+            constexpr bool log_pipeline_keys = false; // ~700 lines per run
+            static std::atomic<uint32_t> pipekey_lines{ 0 };
+            const uint32_t n = pipekey_lines.fetch_add(1, std::memory_order_relaxed);
+            if (log_pipeline_keys && n < 4000) {
+                const auto &sf = record.front_stencil_state_op;
+                const auto &sb = record.back_stencil_state_op;
+                LOG_INFO("[PIPEKEY] #{} vert={} frag={} blend={:016x} layout={:016x} prim={} fmt=0x{:x} cull={} two={} poly={} dfunc={} dwrite={} stF={}/{}/{}/{} stB={}/{}/{}/{} fmode={} fdis={} mask={} gamma={} rp=0x{:x}",
+                    n, hex_string(vertex_program.hash).substr(0, 10), hex_string(fragment_program.hash).substr(0, 10),
+                    fragment_program.blending_hash, vertex_program_binding.key_hash, static_cast<int>(type),
+                    static_cast<uint32_t>(record.color_base_format), static_cast<int>(record.cull_mode), static_cast<int>(record.two_sided),
+                    static_cast<int>(record.front_polygon_mode), static_cast<int>(record.front_depth_func), static_cast<int>(record.front_depth_write_mode),
+                    static_cast<int>(sf.func), static_cast<int>(sf.stencil_fail), static_cast<int>(sf.depth_fail), static_cast<int>(sf.depth_pass),
+                    static_cast<int>(sb.func), static_cast<int>(sb.stencil_fail), static_cast<int>(sb.depth_fail), static_cast<int>(sb.depth_pass),
+                    static_cast<int>(record.front_side_fragment_program_mode), is_fragment_disabled ? 1 : 0,
+                    record.is_maskupdate ? 1 : 0, record.is_gamma_corrected ? 1 : 0,
+                    std::bit_cast<uint64_t>(static_cast<VkRenderPass>(render_pass)));
+            }
+        }
         return result.value;
     } catch (const vk::SystemError &err) {
         const uint32_t failure_index = pipelines_failed++;

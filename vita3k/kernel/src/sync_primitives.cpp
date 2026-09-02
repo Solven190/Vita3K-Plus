@@ -163,7 +163,7 @@ inline static int handle_timeout(KernelState &kernel, const ThreadStatePtr &thre
         bool status = false;
         auto start = std::chrono::steady_clock::now();
         if (*timeout > 0) {
-            status = thread->status_cond.wait_for(primitive_lock, std::chrono::microseconds{ *timeout }, [&] { return thread->status == ThreadStatus::run; });
+            status = thread->wait_for_run_precise(primitive_lock, static_cast<int64_t>(*timeout));
         }
 
         if (!status) {
@@ -1710,6 +1710,52 @@ void KernelState::log_eventflag_history() {
     LOG_ERROR("HANG EVF HISTORY ({} op(s), oldest first):\n{}", count, hist);
 }
 
+int KernelState::nudge_all_condvar_waiters() {
+    // Snapshot the condvars under the kernel lock, then wake outside it (matches the event-flag
+    // breaker's collect-then-act ordering so we never hold the kernel lock across a thread wake).
+    std::vector<CondvarPtr> targets;
+    {
+        const std::lock_guard<std::mutex> lock(mutex);
+        for (auto &[uid, c] : condvars)
+            if (c && c->waiting_threads && !c->waiting_threads->empty())
+                targets.push_back(c);
+        for (auto &[uid, c] : lwcondvars)
+            if (c && c->waiting_threads && !c->waiting_threads->empty())
+                targets.push_back(c);
+    }
+    int woken = 0;
+    std::string names;
+    for (const CondvarPtr &condvar : targets) {
+        const std::lock_guard<std::mutex> condvar_lock(condvar->mutex);
+        int here = 0;
+        while (!condvar->waiting_threads->empty()) {
+            const auto data = *condvar->waiting_threads->begin();
+            const auto t = data.thread;
+            const std::lock_guard<std::mutex> tl(t->mutex);
+            if (t->status == ThreadStatus::wait)
+                t->update_status(ThreadStatus::run, ThreadStatus::wait);
+            condvar->waiting_threads->pop();
+            ++here;
+        }
+        if (here) {
+            woken += here;
+            if (names.size() < 200)
+                names += fmt::format("{}#{}({}) ", condvar->uid == 0 ? "cond" : "cond", condvar->uid, here);
+        }
+    }
+    if (woken) {
+        static int logged = 0;
+        static std::chrono::steady_clock::time_point last_log{};
+        const auto now = std::chrono::steady_clock::now();
+        if (logged < 3 || now - last_log >= std::chrono::seconds(60)) {
+            ++logged;
+            last_log = now;
+            LOG_ERROR("HANG WATCHDOG: spurious-woke {} condvar waiter(s) to break a possible lost-signal stall: {}", woken, names);
+        }
+    }
+    return woken;
+}
+
 int KernelState::try_break_frame_sync_deadlock(std::vector<SceUID> &already_nudged) {
     std::vector<std::pair<SceUID, SceUInt32>> nudges;
     {
@@ -2056,9 +2102,7 @@ SceSize msgpipe_recv(KernelState &kernel, const char *export_name, SceUID thread
             return finish();
         } else { // There's a timeout - wait until we can fill buffer or timeout
             msgpipe_lock.unlock(); // Unlock message pipe object, else we'll deadlock
-            thread->status_cond.wait_for(thread_lock, std::chrono::microseconds{ *pTimeout }, [&] {
-                return thread->status == ThreadStatus::run;
-            });
+            thread->wait_for_run_precise(thread_lock, static_cast<int64_t>(*pTimeout));
             if (msgpipe->beingDeleted) {
                 std::atomic_fetch_add(&msgpipe->remainingThreads, static_cast<size_t>(-1));
                 return SCE_KERNEL_ERROR_WAIT_DELETE;
@@ -2197,9 +2241,7 @@ SceSize msgpipe_send(KernelState &kernel, const char *export_name, SceUID thread
             return finish();
         } else { // There's a timeout - wait until we can fill buffer or timeout
             msgpipe_lock.unlock(); // Unlock message pipe object, else we'll deadlock
-            thread->status_cond.wait_for(thread_lock, std::chrono::microseconds{ *pTimeout }, [&] {
-                return thread->status == ThreadStatus::run;
-            });
+            thread->wait_for_run_precise(thread_lock, static_cast<int64_t>(*pTimeout));
             if (msgpipe->beingDeleted) {
                 std::atomic_fetch_add(&msgpipe->remainingThreads, static_cast<size_t>(-1));
                 return SCE_KERNEL_ERROR_WAIT_DELETE;

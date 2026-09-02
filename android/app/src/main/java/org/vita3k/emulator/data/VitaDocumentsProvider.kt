@@ -1,9 +1,11 @@
 package org.vita3k.emulator.data
 
+import android.content.Context
 import android.database.Cursor
 import android.database.MatrixCursor
 import android.os.CancellationSignal
 import android.os.ParcelFileDescriptor
+import android.provider.DocumentsContract
 import android.provider.DocumentsContract.Document
 import android.provider.DocumentsContract.Root
 import android.provider.DocumentsProvider
@@ -17,7 +19,20 @@ class VitaDocumentsProvider : DocumentsProvider() {
 
     companion object {
         const val ROOT_ID = "vita3k"
-        private const val DOC_ROOT = "vita:"
+        const val DOC_ROOT = "vita:"
+
+        const val ROOT_ID_STORAGE = "vita3k-storage"
+        const val DOC_ROOT_STORAGE = "storage:"
+
+        fun authority(context: Context): String = "${context.packageName}.documents"
+
+        fun notifyRootsChanged(context: Context) {
+            runCatching {
+                context.contentResolver.notifyChange(
+                    DocumentsContract.buildRootsUri(authority(context)), null
+                )
+            }
+        }
 
         private val ROOT_PROJECTION = arrayOf(
             Root.COLUMN_ROOT_ID,
@@ -42,33 +57,57 @@ class VitaDocumentsProvider : DocumentsProvider() {
     override fun onCreate(): Boolean = true
 
     // The provider can be spawned by a file manager before the emulator ever runs, so the native
-    // side may not be available; fall back to the default storage location in that case.
-    private fun baseDir(): File {
-        val nativePath = runCatching {
-            if (NativeLib.isInitialized()) NativeLib.getCurrentEmulatorPath() else null
-        }.getOrNull()
-        val path = nativePath?.takeIf { it.isNotEmpty() }
-            ?: AppStorage.defaultStoragePath(requireNotNull(context))
-        return File(path)
+    private fun appFilesDirOrNull(): File? {
+        val ctx = context ?: return null
+        return runCatching { File(AppStorage.storageRootPath(ctx)) }.getOrNull()
     }
 
+    private fun emulatorStorageDirOrNull(): File? {
+        val nativePath = runCatching {
+            if (NativeLib.isInitialized()) NativeLib.getCurrentEmulatorPath() else null
+        }.getOrNull()?.takeIf { it.isNotEmpty() }
+        if (nativePath != null)
+            return File(nativePath)
+        val ctx = context ?: return null
+        return runCatching { File(AppStorage.defaultStoragePath(ctx)) }.getOrNull()
+    }
+
+    private fun isUnder(child: File, parent: File): Boolean = runCatching {
+        val p = parent.canonicalPath
+        val c = child.canonicalPath
+        c == p || c.startsWith(p + File.separator)
+    }.getOrDefault(false)
+
+    private fun storageNeedsOwnRoot(): Boolean {
+        val app = appFilesDirOrNull() ?: return false
+        val storage = emulatorStorageDirOrNull() ?: return false
+        return !isUnder(storage, app)
+    }
+
+    private fun baseDirForDocId(docId: String): File? =
+        if (docId.startsWith(DOC_ROOT_STORAGE)) emulatorStorageDirOrNull() else appFilesDirOrNull()
+
+    private fun docRootFor(docId: String): String =
+        if (docId.startsWith(DOC_ROOT_STORAGE)) DOC_ROOT_STORAGE else DOC_ROOT
+
     private fun fileForDocId(docId: String, mustExist: Boolean = true): File {
-        if (!docId.startsWith(DOC_ROOT))
+        if (!docId.startsWith(DOC_ROOT) && !docId.startsWith(DOC_ROOT_STORAGE))
             throw FileNotFoundException("Unknown document $docId")
-        val base = baseDir()
-        val rel = docId.substring(DOC_ROOT.length)
+        val base = baseDirForDocId(docId)
+            ?: throw FileNotFoundException("Storage location is not available")
+        val rel = docId.substring(docRootFor(docId).length)
         val file = if (rel.isEmpty()) base else File(base, rel)
         val baseCanonical = base.canonicalPath
         val canonical = file.canonicalPath
         if (canonical != baseCanonical && !canonical.startsWith(baseCanonical + File.separator))
-            throw FileNotFoundException("Document $docId is outside the emulator storage")
+            throw FileNotFoundException("Document $docId is outside its root")
         if (mustExist && !file.exists())
             throw FileNotFoundException("Missing document $docId")
         return file
     }
 
     private fun childDocId(parentDocId: String, name: String): String =
-        if (parentDocId == DOC_ROOT) DOC_ROOT + name else "$parentDocId/$name"
+        if (parentDocId.endsWith(":")) parentDocId + name else "$parentDocId/$name"
 
     private fun mimeType(file: File): String {
         if (file.isDirectory)
@@ -78,7 +117,7 @@ class VitaDocumentsProvider : DocumentsProvider() {
     }
 
     private fun includeFile(cursor: MatrixCursor, docId: String, file: File) {
-        val isRoot = docId == DOC_ROOT
+        val isRoot = docId == DOC_ROOT || docId == DOC_ROOT_STORAGE
         var flags = 0
         if (file.isDirectory) {
             flags = flags or Document.FLAG_DIR_SUPPORTS_CREATE
@@ -92,7 +131,11 @@ class VitaDocumentsProvider : DocumentsProvider() {
         cursor.newRow().apply {
             add(Document.COLUMN_DOCUMENT_ID, docId)
             add(Document.COLUMN_MIME_TYPE, mimeType(file))
-            add(Document.COLUMN_DISPLAY_NAME, if (isRoot) "Vita3K+" else file.name)
+            add(Document.COLUMN_DISPLAY_NAME, when {
+                docId == DOC_ROOT -> "Vita3K+"
+                docId == DOC_ROOT_STORAGE -> "Vita3K+ storage"
+                else -> file.name
+            })
             add(Document.COLUMN_LAST_MODIFIED, file.lastModified())
             add(Document.COLUMN_FLAGS, flags)
             add(Document.COLUMN_SIZE, if (file.isFile) file.length() else null)
@@ -101,14 +144,27 @@ class VitaDocumentsProvider : DocumentsProvider() {
 
     override fun queryRoots(projection: Array<out String>?): Cursor {
         val cursor = MatrixCursor(projection ?: ROOT_PROJECTION)
+        val appFiles = appFilesDirOrNull()
         cursor.newRow().apply {
             add(Root.COLUMN_ROOT_ID, ROOT_ID)
             add(Root.COLUMN_FLAGS, Root.FLAG_SUPPORTS_CREATE or Root.FLAG_SUPPORTS_IS_CHILD or Root.FLAG_LOCAL_ONLY)
             add(Root.COLUMN_ICON, R.mipmap.ic_launcher_plus)
             add(Root.COLUMN_TITLE, "Vita3K+")
-            add(Root.COLUMN_SUMMARY, context?.getString(R.string.documents_root_summary))
+            add(Root.COLUMN_SUMMARY, runCatching { context?.getString(R.string.documents_root_summary) }.getOrNull())
             add(Root.COLUMN_DOCUMENT_ID, DOC_ROOT)
-            add(Root.COLUMN_AVAILABLE_BYTES, baseDir().usableSpace)
+            add(Root.COLUMN_AVAILABLE_BYTES, runCatching { appFiles?.usableSpace }.getOrNull() ?: 0L)
+        }
+        if (runCatching { storageNeedsOwnRoot() }.getOrDefault(false)) {
+            val storage = emulatorStorageDirOrNull()
+            cursor.newRow().apply {
+                add(Root.COLUMN_ROOT_ID, ROOT_ID_STORAGE)
+                add(Root.COLUMN_FLAGS, Root.FLAG_SUPPORTS_CREATE or Root.FLAG_SUPPORTS_IS_CHILD or Root.FLAG_LOCAL_ONLY)
+                add(Root.COLUMN_ICON, R.mipmap.ic_launcher_plus)
+                add(Root.COLUMN_TITLE, "Vita3K+ storage")
+                add(Root.COLUMN_SUMMARY, runCatching { context?.getString(R.string.documents_storage_root_summary) }.getOrNull())
+                add(Root.COLUMN_DOCUMENT_ID, DOC_ROOT_STORAGE)
+                add(Root.COLUMN_AVAILABLE_BYTES, runCatching { storage?.usableSpace }.getOrNull() ?: 0L)
+            }
         }
         return cursor
     }

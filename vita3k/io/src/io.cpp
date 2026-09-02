@@ -411,7 +411,7 @@ SceUID open_file(IOState &io, const char *path, const int flags, const fs::path 
     return fd;
 }
 
-static constexpr bool IODIAG_ENABLED = true;
+static constexpr bool IODIAG_ENABLED = false; // seq-185 diagnostic; served its purpose (GB3 stale pointer, KZ jump cadence). Off for commit.
 
 void iodiag_log_read_dst(const char *kind, SceUID fd, SceOff offset, SceSize nbyte, int result,
     Address dst, const char *block, const char *thread) {
@@ -500,8 +500,15 @@ int read_file_into_guest(MemState &mem, Address dst, IOState &io, SceUID fd, Sce
     static std::atomic<uint32_t> split_reads{ 0 };
     if (base != mem.memory.get()) {
         const uint32_t n = mapped_reads.fetch_add(1, std::memory_order_relaxed) + 1;
-        if (n == 1 || (n & 255) == 0)
-            LOG_INFO("[IO] {}: file read of {} bytes into a GPU-mapped guest range 0x{:X}, resolved under the transition lock ({} such reads so far, {} split across backings)", export_name, size, dst, n, split_reads.load(std::memory_order_relaxed));
+        {
+            static std::atomic<uint32_t> gpu_range_logs{ 0 };
+            static std::atomic<int64_t> gpu_range_last_us{ 0 };
+            const int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+            int64_t last = gpu_range_last_us.load(std::memory_order_relaxed);
+            if (gpu_range_logs.fetch_add(1, std::memory_order_relaxed) < 8
+                || (now_us - last >= 60'000'000 && gpu_range_last_us.compare_exchange_strong(last, now_us, std::memory_order_relaxed)))
+                LOG_INFO("[IO] {}: file read of {} bytes into a GPU-mapped guest range 0x{:X}, resolved under the transition lock ({} such reads so far, {} split across backings)", export_name, size, dst, n, split_reads.load(std::memory_order_relaxed));
+        }
     }
     if (contiguous)
         return read_to(Ptr<void>(dst).get(mem));
