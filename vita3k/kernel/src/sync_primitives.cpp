@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <kernel/types.h>
 #include <set>
 #include <thread>
@@ -853,6 +854,14 @@ inline static int mutex_unlock_impl(KernelState &kernel, MemState &mem, const ch
                 workarea_mem->lockCount = mutex->lock_count;
                 workarea_mem->owner = mutex->owner ? mutex->owner->id : 0;
             }
+        } else {
+            // The kernel rejects an unlock by a thread that does not own the mutex
+            static std::atomic<uint32_t> foreign_unlocks{ 0 };
+            const uint32_t n = foreign_unlocks.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (n <= 16 || (n & 1023) == 0)
+                LOG_WARN("[LWMUTEX] {}: thread '{}' ({}) unlocked mutex#{} '{}' it does not own (owner {}, lock_count {}) - ignored (#{})",
+                    export_name, current_thread->name, thread_id, mutex->uid, mutex->name,
+                    mutex->owner ? fmt::format("'{}' ({})", mutex->owner->name, mutex->owner->id) : std::string("nobody"), mutex->lock_count, n);
         }
     }
 
@@ -1387,11 +1396,37 @@ int condvar_wait(KernelState &kernel, MemState &mem, const char *export_name, Sc
     const auto data_it = condvar->waiting_threads->push(data);
     thread_lock.unlock();
 
-    if (auto error = handle_timeout(kernel, thread, thread_lock, condition_variable_lock, condvar->waiting_threads, data_it, export_name, timeout))
-        return error;
-
+    const int wait_res = handle_timeout(kernel, thread, thread_lock, condition_variable_lock, condvar->waiting_threads, data_it, export_name, timeout);
     condition_variable_lock.unlock();
-    return mutex_lock_impl(kernel, mem, export_name, thread_id, 1, condvar->associated_mutex, weight, timeout, false);
+
+    // The kernel hands the associated mutex back to the waiter before returning no matter how the wait
+    // ended, and Sony's own libraries depend on that: the Fios scheduler records itself as the owner of
+    // its lock after every return from sceKernelWaitLwCond, timeout included, and traps on a later unlock
+    // by a thread that is not the recorded owner. Returning WAIT_TIMEOUT without the mutex let another
+    // thread take and release it in between, which is exactly that trap. The re-lock is untimed; a
+    // waiter that times out still comes back owning the mutex.
+    if (wait_res != SCE_KERNEL_OK) {
+        ThreadStatePtr holder;
+        {
+            const std::lock_guard<std::mutex> owner_guard(condvar->associated_mutex->mutex);
+            holder = condvar->associated_mutex->owner;
+        }
+        const auto relock_start = std::chrono::steady_clock::now();
+        const int lock_res = mutex_lock_impl(kernel, mem, export_name, thread_id, 1, condvar->associated_mutex, weight, nullptr, false);
+        const auto relock_us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - relock_start).count();
+        static std::atomic<uint32_t> timeouts{ 0 };
+        static std::atomic<int64_t> last_log_us{ 0 };
+        const uint32_t n = timeouts.fetch_add(1, std::memory_order_relaxed) + 1;
+        const int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (n <= 8 || holder || lock_res != SCE_KERNEL_OK || now_us - last_log_us.load(std::memory_order_relaxed) >= 60'000'000) {
+            last_log_us.store(now_us, std::memory_order_relaxed);
+            LOG_WARN("[LWCOND] {}: timed wait on cond#{} '{}' by '{}' ({}) timed out; re-acquired mutex#{} (held by {} at the timeout, re-lock took {} us, result 0x{:X}) - timeout #{}",
+                export_name, condvar->uid, condvar->name, thread->name, thread_id, condvar->associated_mutex->uid,
+                holder ? fmt::format("'{}' ({})", holder->name, holder->id) : std::string("nobody"), relock_us, static_cast<uint32_t>(lock_res), n);
+        }
+        return wait_res;
+    }
+    return mutex_lock_impl(kernel, mem, export_name, thread_id, 1, condvar->associated_mutex, weight, nullptr, false);
 }
 
 int condvar_signal(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID condid, Condvar::SignalTarget signal_target, SyncWeight weight) {

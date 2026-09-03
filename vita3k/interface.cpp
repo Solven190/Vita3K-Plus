@@ -46,6 +46,7 @@
 #include <util/vector_utils.h>
 #include <util/vita_theme_utils.h>
 
+#include <cpu/functions.h>
 #include <gdbstub/functions.h>
 #include <stb_image_write.h>
 
@@ -445,12 +446,6 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv, const
         emuenv.cfg.current_config.preempt_on_wake,
         emuenv.cfg.current_config.high_accuracy, emuenv.cfg.current_config.resolution_multiplier, emuenv.cfg.current_config.guest_cores);
     guest_sched_set_cores(emuenv.cfg.current_config.guest_cores);
-    constexpr int FORK_GUEST_CORES_OVERRIDE = 3;
-    if (FORK_GUEST_CORES_OVERRIDE > 0 && emuenv.kernel.accurate_thread_scheduling
-        && emuenv.cfg.current_config.guest_cores != FORK_GUEST_CORES_OVERRIDE) {
-        LOG_WARN("[GUEST-SCHED] FORK override: guest-cores {} -> {} (Vita application cores)", emuenv.cfg.current_config.guest_cores, FORK_GUEST_CORES_OVERRIDE);
-        guest_sched_set_cores(FORK_GUEST_CORES_OVERRIDE);
-    }
     if (emuenv.kernel.accurate_thread_scheduling)
         LOG_INFO("Accurate thread scheduling enabled: default-affinity guest threads run one at a time, by priority");
     if (emuenv.kernel.preempt_on_wake)
@@ -654,6 +649,8 @@ ExitCode load_app(int32_t &main_module_id, EmuEnvState &emuenv, const AppLaunchR
         return ModuleLoadFailed;
     }
 
+    // Breakpoint instructions only halt a thread when someone can resume it
+    set_breakpoints_halt(emuenv.cfg.gdbstub);
     if (emuenv.cfg.gdbstub) {
         emuenv.kernel.debugger.wait_for_debugger = true;
         server_open(emuenv);

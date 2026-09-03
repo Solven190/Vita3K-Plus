@@ -38,12 +38,12 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
-#include <timeapi.h>
+// clang-format off
 #include <windows.h>
+
+#include <timeapi.h>
+// clang-format on
 #pragma comment(lib, "winmm.lib")
-#endif
-#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
-#include <intrin.h>
 #endif
 #include <cstdlib>
 #include <cstring>
@@ -82,6 +82,8 @@ void request_precise_host_timer() {
 #endif
 }
 
+// Keep this a plain timed wait, because spinning here would churn the waited-on primitive's own lock
+// and can starve whichever thread is trying to signal it.
 bool ThreadState::wait_for_run_precise(std::unique_lock<std::mutex> &lock, int64_t timeout_us) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(timeout_us);
     const auto woken = [&] { return status == ThreadStatus::run; };
@@ -118,6 +120,7 @@ int ThreadState::init(const char *name, Ptr<const void> entry_point, int init_pr
     if (!cpu) {
         return SCE_KERNEL_ERROR_ERROR;
     }
+    cpu->on_guest_breakpoint = [this](uint32_t pc) { report_guest_breakpoint(pc); };
     if (kernel.debugger.watch_code) {
         set_log_code(*cpu, true);
     }
@@ -820,6 +823,7 @@ void ThreadState::suspend() {
 }
 
 void ThreadState::suspend_and_wait() {
+    LOG_INFO("[SUSPLOG] vm-suspend thread '{}' ({}) current status {}", name, id, static_cast<int>(status));
     guest_sched_release_for_block();
     std::unique_lock<std::mutex> lock(mutex);
     vm_suspended = true;
@@ -850,6 +854,7 @@ void ThreadState::resume(bool step) {
 
 void ThreadState::resume_if_suspended() {
     const std::lock_guard<std::mutex> lock(mutex);
+    LOG_INFO("[SUSPLOG] vm-resume thread '{}' ({}) from status {}", name, id, static_cast<int>(status));
     vm_suspended = false;
     external_suspend = false;
     suspend_requested = false;
@@ -886,8 +891,11 @@ bool ThreadState::resume_from_world() {
     world_stopped = false;
 
     // Never touch a suspension that did not come from us.
-    if (vm_suspended || external_suspend)
+    if (vm_suspended || external_suspend) {
+        if (status == ThreadStatus::suspend)
+            LOG_WARN("[WORLDSTOP] thread '{}' ({}) stays suspended after the world resumes: vm_suspended={} external_suspend={}", name, id, vm_suspended, external_suspend);
         return false;
+    }
 
     if (parked_by_us && status == ThreadStatus::suspend) {
         update_status(ThreadStatus::run);
@@ -900,6 +908,57 @@ bool ThreadState::resume_from_world() {
         return true;
     }
     return false;
+}
+
+// A retail game never executes a breakpoint on purpose. When one fires it is a library trapping on a broken invariant it found.
+void ThreadState::report_guest_breakpoint(uint32_t pc) {
+    guest_breakpoints++;
+    static std::atomic<uint32_t> total{ 0 };
+    static std::atomic<int64_t> last_verbose_us{ 0 };
+    const uint32_t n = total.fetch_add(1, std::memory_order_relaxed) + 1;
+    const int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (n > 16 && now_us - last_verbose_us.load(std::memory_order_relaxed) < 60'000'000)
+        return;
+    last_verbose_us.store(now_us, std::memory_order_relaxed);
+
+    std::string ctx = fmt::format("[BKPT] guest breakpoint #{} on thread '{}' ({}) at 0x{:08X} ({} on this thread) - no debugger attached, continuing at 0x{:08X}",
+        n, name, id, pc, guest_breakpoints, read_pc(*cpu) & ~1u);
+    ctx += fmt::format("\n  last import nid=0x{:08X} called from lr=0x{:08X}", last_import_nid, last_import_lr);
+    uint32_t rv[13];
+    ctx += "\n  regs:";
+    for (int ri = 0; ri <= 12; ri++) {
+        rv[ri] = read_reg(*cpu, ri);
+        ctx += fmt::format(" r{}=0x{:X}", ri, rv[ri]);
+    }
+    ctx += fmt::format(" sp=0x{:X} lr=0x{:X}", read_sp(*cpu), read_lr(*cpu));
+    uint32_t a = pc >= 32 ? pc - 32 : 0;
+    while (a <= pc + 8) {
+        uint32_t probe = 0;
+        if (!debug_safe_copy_guest(mem, a, &probe, sizeof(probe)))
+            break;
+        uint16_t insn_size = 2;
+        ctx += fmt::format("\n  {}0x{:08X}: {}", a == pc ? ">" : " ", a, disassemble(*cpu, a, &insn_size));
+        a += insn_size ? insn_size : 2;
+    }
+    std::set<uint32_t> bases;
+    for (int ri = 0; ri <= 7; ri++)
+        bases.insert(rv[ri] & ~3u);
+    bases.insert(read_sp(*cpu) & ~3u);
+    for (const uint32_t base : bases) {
+        uint32_t words[16];
+        if (base < 0x1000 || !debug_safe_copy_guest(mem, base, words, sizeof(words)))
+            continue;
+        ctx += fmt::format("\n  mem 0x{:08X}:", base);
+        for (const uint32_t w : words)
+            ctx += fmt::format(" {:08X}", w);
+    }
+    ctx += "\n" + log_stack_traceback();
+    LOG_ERROR("{}", ctx);
+}
+
+std::string ThreadState::describe_suspend_state() const {
+    return fmt::format("suspend_requested={} vm_suspended={} external_suspend={} world_stop_requested={} world_stopped={} single_stepping={} hit_breakpoint={} guest_breakpoints={} call_level={}",
+        suspend_requested, vm_suspended, external_suspend, world_stop_requested, world_stopped, single_stepping, hit_breakpoint(*cpu), guest_breakpoints, call_level);
 }
 
 std::string ThreadState::log_stack_traceback() const {

@@ -145,6 +145,9 @@ struct ThreadState {
     bool resume_from_world();
 
     std::string log_stack_traceback() const;
+    void report_guest_breakpoint(uint32_t pc);
+    std::string describe_suspend_state() const;
+    uint32_t guest_breakpoints = 0;
 
 private:
     void push_arguments(const std::vector<uint32_t> &args);
