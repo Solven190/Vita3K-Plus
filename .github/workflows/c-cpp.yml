@@ -1,241 +1,51 @@
-name: Build CI
+name: Build APK
 
 on:
-  push:
-    paths-ignore:
-      - '**.md'
-  pull_request:
-    paths-ignore:
-      - '**.md'
+  workflow_dispatch:
 
 env:
-  BUILD_CONFIG: Release
-  QT_VERSION: '6.11.0'
-  SCCACHE_GHA_ENABLED: "true"
+  ANDROID_API_LEVEL: '35'
+  ANDROID_BUILD_TOOLS: '36.0.0'
+  ANDROID_NDK_VERSION: '29.0.14206865'
+  VCPKG_ROOT: /usr/local/share/vcpkg
+  VCPKG_TRIPLET: arm64-android
 
 jobs:
-  desktop-build:
-    name: Desktop (${{ matrix.platform }})
-    runs-on: ${{ matrix.runs_on }}
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            runs_on: ubuntu-latest
-            platform: linux-x64
-            arch: x86_64
-            cmake_preset: ci-linux-clang-appimage
-            linuxdeploy_command: /usr/local/bin/linuxdeploy-x86_64.AppImage
-            cache_path: ''
-            qt_install_deps: 'true'
-
-          - os: ubuntu-24.04-arm
-            runs_on: ubuntu-24.04-arm
-            platform: linux-arm64
-            arch: aarch64
-            cmake_preset: ci-linux-clang-appimage
-            linuxdeploy_command: /usr/local/bin/linuxdeploy-aarch64.AppImage
-            cache_path: ''
-            qt_install_deps: 'true'
-
-          - os: windows-latest
-            runs_on: windows-latest
-            platform: windows-x64
-            arch: x86_64
-            cmake_preset: ci-windows-msvc
-            vcpkg_root: C:\vcpkg
-            vcpkg_triplet: x64-windows-static-md
-            cache_path: |
-              C:\vcpkg\installed
-              C:\vcpkg\packages
-            qt_install_deps: 'false'
-
-          - os: windows-11-arm
-            runs_on: windows-11-arm
-            platform: windows-arm64
-            cmake_preset: ci-windows-msys2-clang
-            msys2_env: CLANGARM64
-            cache_path: C:\msys2-ccache
-            qt_install_deps: 'false'
-
-          - os: macos-intel
-            platform: macos-x64
-            runs_on: macos-latest
-            cmake_preset: ci-macos-x64
-            cache_path: ~/Library/Caches/ccache
-            qt_install_deps: 'false'
-
-          - os: macos-arm64
-            platform: macos-arm64
-            runs_on: macos-latest
-            cmake_preset: ci-macos-arm64
-            cache_path: ~/Library/Caches/ccache
-            qt_install_deps: 'false'
-
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          submodules: recursive
-
-      - name: Restore cache
-        uses: actions/cache@v5
-        if: ${{ matrix.cache_path != '' }}
-        with:
-          path: ${{ matrix.cache_path }}
-          key: cache-${{ matrix.platform }}-${{ env.BUILD_CONFIG }}-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**', '.ci/**', '.github/workflows/c-cpp.yml', 'vcpkg.json') }}
-          restore-keys: |
-            cache-${{ matrix.platform }}-${{ env.BUILD_CONFIG }}-
-
-      - name: Set up build environment (Linux)
-        run: bash ./.ci/setup-linux.sh ${{ matrix.arch }} with-appimage
-        if: startsWith(matrix.platform, 'linux-')
-
-      - name: Set up build environment (macOS)
-        run: bash ./.ci/setup-macos.sh
-        if: startsWith(matrix.platform, 'macos-')
-
-      - name: Set up build environment (Windows MSVC)
-        shell: pwsh
-        env:
-          VCPKG_ROOT: ${{ matrix.vcpkg_root }}
-        run: .\.ci\setup-windows-msvc.ps1 -VcpkgTriplet '${{ matrix.vcpkg_triplet }}'
-        if: matrix.platform == 'windows-x64'
-
-      - uses: TheMrMilchmann/setup-msvc-dev@v4
-        with:
-          arch: ${{ matrix.arch }}
-        if: matrix.platform == 'windows-x64'
-
-      - uses: mozilla-actions/sccache-action@v0.0.10
-        if: startsWith(matrix.platform, 'linux-') || matrix.platform == 'windows-x64'
-        with:
-          disable_annotations: true
-
-      - name: Set up MSYS2 (Windows ARM)
-        uses: msys2/setup-msys2@v2
-        if: matrix.platform == 'windows-arm64'
-        with:
-          msystem: ${{ matrix.msys2_env }}
-          update: true
-          cache: true
-          install: |
-            git
-          pacboy: |
-            clang:p
-            ccache:p
-            cmake:p
-            lld:p
-            ninja:p
-            boost:p
-            openssl:p
-            curl:p
-            zlib:p
-            qt6-base:p
-            qt6-multimedia:p
-            qt6-svg:p
-            qt6-tools:p
-
-      - name: Reset ccache statistics
-        run: ccache -z
-        if: startsWith(matrix.platform, 'macos-')
-
-      - name: Install Qt 6.11.0 (Windows MSVC)
-        uses: jurplel/install-qt-action@v4
-        if: matrix.platform == 'windows-x64'
-        with:
-          version: ${{ env.QT_VERSION }}
-          modules: qtmultimedia
-          host: windows
-          target: desktop
-          arch: win64_msvc2022_64
-          cache: true
-          install-deps: ${{ matrix.qt_install_deps }}
-          aqtsource: git+https://github.com/miurahr/aqtinstall.git@f383b3c7d9658e881bd8ce8810057393bd934ee1
-
-      - name: Install Qt 6.11.0
-        uses: jurplel/install-qt-action@v4
-        if: matrix.platform != 'windows-arm64' && matrix.platform != 'windows-x64'
-        with:
-          version: ${{ env.QT_VERSION }}
-          modules: qtmultimedia
-          cache: true
-          install-deps: ${{ matrix.qt_install_deps }}
-
-      - name: Build desktop target (Linux/macOS)
-        env:
-          VITA3K_LINUXDEPLOY_COMMAND: ${{ matrix.linuxdeploy_command }}
-        run: bash ./.ci/build-desktop.sh --preset ${{ matrix.cmake_preset }} --config ${{ env.BUILD_CONFIG }}
-        if: startsWith(matrix.platform, 'linux-') || startsWith(matrix.platform, 'macos-')
-
-      - name: Build desktop target (Windows MSVC)
-        shell: bash
-        env:
-          VCPKG_ROOT: ${{ matrix.vcpkg_root }}
-        run: bash ./.ci/build-desktop.sh --preset ${{ matrix.cmake_preset }} --config ${{ env.BUILD_CONFIG }}
-        if: matrix.platform == 'windows-x64'
-
-      - name: Build desktop target (Windows ARM MSYS2)
-        shell: msys2 {0}
-        run: bash ./.ci/build-windows-msys2.sh --preset ${{ matrix.cmake_preset }} --config ${{ env.BUILD_CONFIG }}
-        if: matrix.platform == 'windows-arm64'
-
-      - name: Compute artifact paths
-        shell: bash
-        run: |
-          echo "GIT_SHORT_SHA=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
-          echo "ARTIFACT_NAME=vita3k-$(git rev-parse --short HEAD)-${{ matrix.platform }}" >> "$GITHUB_ENV"
-          echo "ARTIFACT_DIR=artifacts/vita3k-$(git rev-parse --short HEAD)-${{ matrix.platform }}" >> "$GITHUB_ENV"
-
-      - name: Stage desktop artifact (Linux/macOS)
-        run: bash ./.ci/package-desktop.sh --platform ${{ matrix.platform }} --preset ${{ matrix.cmake_preset }} --config ${{ env.BUILD_CONFIG }} --output-dir "${{ env.ARTIFACT_DIR }}"
-        if: startsWith(matrix.platform, 'linux-') || startsWith(matrix.platform, 'macos-')
-
-      - name: Stage desktop artifact (Windows MSVC)
-        shell: bash
-        run: bash ./.ci/package-desktop.sh --platform ${{ matrix.platform }} --preset ${{ matrix.cmake_preset }} --config ${{ env.BUILD_CONFIG }} --output-dir "${{ env.ARTIFACT_DIR }}"
-        if: matrix.platform == 'windows-x64'
-
-      - name: Stage desktop artifact (Windows ARM MSYS2)
-        shell: msys2 {0}
-        run: bash ./.ci/package-desktop.sh --platform ${{ matrix.platform }} --preset ${{ matrix.cmake_preset }} --config ${{ env.BUILD_CONFIG }} --output-dir "${{ env.ARTIFACT_DIR }}"
-        if: matrix.platform == 'windows-arm64'
-
-      - name: Print ccache statistics
-        run: ccache -s
-        if: startsWith(matrix.platform, 'macos-')
-
-      - name: Print sccache statistics
-        run: sccache --show-stats
-        if: startsWith(matrix.platform, 'linux-') || matrix.platform == 'windows-x64'
-
-      - name: Upload desktop artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: ${{ env.ARTIFACT_NAME }}
-          path: ${{ env.ARTIFACT_DIR }}
-
-  android-build:
-    name: Android
+  build:
+    name: Build APK
     runs-on: ubuntu-latest
+    timeout-minutes: 150
+    permissions:
+      contents: read
+
+    concurrency:
+      group: build-apk-${{ github.ref }}
+      cancel-in-progress: true
 
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          submodules: recursive
+          filter: blob:none
+          submodules: false
 
-      - name: Restore native dependency cache
+      - name: Update submodules
+        run: |
+          set -euo pipefail
+          git submodule sync --recursive
+          git submodule update --init --recursive --depth 1 --jobs 4 --recommend-shallow \
+            || git submodule update --init --recursive --jobs 4
+
+      - name: Restore vcpkg cache
         uses: actions/cache@v5
         with:
           path: |
-            /usr/local/share/vcpkg/installed
-            /usr/local/share/vcpkg/packages
-          key: cache-android-native-${{ hashFiles('CMakeLists.txt', 'cmake/**', '.ci/**', 'android/app/build.gradle', 'vcpkg.json') }}
+            ${{ env.VCPKG_ROOT }}/installed
+            ~/.cache/vcpkg/archives
+          key: build-vcpkg-${{ env.VCPKG_TRIPLET }}-v2-${{ hashFiles('vcpkg.json') }}
           restore-keys: |
-            cache-android-native-
+            build-vcpkg-${{ env.VCPKG_TRIPLET }}-v2-
 
       - name: Set up Java
         uses: actions/setup-java@v5
@@ -250,103 +60,128 @@ jobs:
           cache-provider: basic
           validate-wrappers: false
 
-      - name: Set up Android SDK tools
+      - name: Set up Android SDK
         uses: android-actions/setup-android@v4
 
-      - name: Set up Android build environment
-        env:
-          VCPKG_ROOT: /usr/local/share/vcpkg
-        run: bash ./.ci/setup-android.sh
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1.2.23
+        with:
+          key: build-ccache
+          max-size: 2G
+          verbose: 1
 
-      - uses: hendrikmuhs/ccache-action@v1.2.23
-
-      - name: Decode Android keystore
-        env:
-          KEYSTORE_ENCODED: ${{ secrets.KEYSTORE }}
+      - name: Install SDK packages
         run: |
-          if [ -n "$KEYSTORE_ENCODED" ]; then
-            echo "$KEYSTORE_ENCODED" | base64 --decode > /home/runner/keystore.jks
+          set -euo pipefail
+          sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          packages=()
+          [ -d "${sdk_root}/platforms/android-${ANDROID_API_LEVEL}" ] \
+            || packages+=("platforms;android-${ANDROID_API_LEVEL}")
+          [ -d "${sdk_root}/build-tools/${ANDROID_BUILD_TOOLS}" ] \
+            || packages+=("build-tools;${ANDROID_BUILD_TOOLS}")
+          [ -d "${sdk_root}/ndk/${ANDROID_NDK_VERSION}" ] \
+            || packages+=("ndk;${ANDROID_NDK_VERSION}")
+          if [ ${#packages[@]} -ne 0 ]; then
+            echo "Installing: ${packages[*]}"
+            set +o pipefail
+            yes | sdkmanager --licenses > /dev/null
+            set -o pipefail
+            sdkmanager --install "${packages[@]}"
+          else
+            echo "All SDK packages are already present."
+          fi
+          echo "ANDROID_NDK_HOME=${sdk_root}/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Install vcpkg dependencies
+        run: |
+          set -euo pipefail
+          if ! command -v ninja > /dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y ninja-build
+          fi
+          vcpkg install --triplet "$VCPKG_TRIPLET"
+
+      - name: Stage assets
+        run: |
+          set -euo pipefail
+          mkdir -p android/app/assets
+          rm -rf android/app/assets/data android/app/assets/shaders-builtin
+          cp -r data android/app/assets/data
+          cp -r vita3k/shaders-builtin android/app/assets/shaders-builtin
+
+      - name: Generate debug keystore
+        run: |
+          set -euo pipefail
+          keystore_dir="$HOME/.android"
+          keystore_file="$keystore_dir/debug.keystore"
+          mkdir -p "$keystore_dir"
+          if [ ! -f "$keystore_file" ]; then
+            echo "Generating debug keystore..."
+            keytool -genkey -v -keystore "$keystore_file" \
+              -alias androiddebugkey -storepass android -keypass android \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug, O=Android, C=US"
           fi
 
-      - name: Compute artifact paths
-        shell: bash
+      - name: Configure ccache
         run: |
-          echo "GIT_SHORT_SHA=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
-          echo "ARTIFACT_NAME=vita3k-$(git rev-parse --short HEAD)-android" >> "$GITHUB_ENV"
-          echo "ARTIFACT_DIR=artifacts/vita3k-$(git rev-parse --short HEAD)-android" >> "$GITHUB_ENV"
+          set -euo pipefail
+          {
+            echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+            echo "CCACHE_NOHASHDIR=true"
+            echo "CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime,pch_defines,locale"
+            echo "CCACHE_COMPRESS=1"
+          } >> "$GITHUB_ENV"
+          ccache -z
 
-      - name: Build Android target
-        env:
-          SIGNING_STORE_PATH: /home/runner/keystore.jks
-          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
-          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
-          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
-          VCPKG_ROOT: /usr/local/share/vcpkg
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
-        run: bash ./.ci/build-android.sh "${{ env.ARTIFACT_DIR }}"
+      - name: Build APK
+        working-directory: android
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew --stacktrace :app:assembleRelease \
+            -Pandroid.injected.signing.store.file=$HOME/.android/debug.keystore \
+            -Pandroid.injected.signing.store.password=android \
+            -Pandroid.injected.signing.key.alias=androiddebugkey \
+            -Pandroid.injected.signing.key.password=android
 
-      - name: Print Android ccache statistics
+      - name: Collect APK
+        run: |
+          set -euo pipefail
+          out_dir=android/app/build/outputs/apk/release
+          apk="$(find "$out_dir" -maxdepth 1 -name '*.apk' -print -quit)"
+          if [ -z "$apk" ]; then
+            echo "No APK produced in $out_dir" >&2
+            ls -alR "$out_dir" >&2 || true
+            exit 1
+          fi
+          echo "Found $apk"
+          mkdir -p artifacts
+          cp "$apk" "artifacts/Vita3K-Plus-release.apk"
+          (cd artifacts && sha256sum Vita3K-Plus-release.apk > Vita3K-Plus-release.apk.sha256)
+          echo "ARTIFACT_NAME=Vita3K-Plus-release" >> "$GITHUB_ENV"
+          ls -al artifacts
+
+      - name: Verify APK signature
+        run: |
+          set -euo pipefail
+          build_tools="${ANDROID_SDK_ROOT:-$ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS}"
+          "${build_tools}/apksigner" verify --print-certs artifacts/Vita3K-Plus-release.apk || echo "Signature verification failed, but continuing."
+
+      - name: Show APK info
+        run: |
+          set -euo pipefail
+          aapt="$(find "${ANDROID_SDK_ROOT:-$ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS}" -name aapt2 -print -quit)"
+          "$aapt" dump badging artifacts/Vita3K-Plus-release.apk | grep -E "^package|application-label:|native-code" || true
+
+      - name: Print ccache statistics
+        if: always()
         run: ccache -s
 
-      - name: Upload Android artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v7
         with:
           name: ${{ env.ARTIFACT_NAME }}
-          path: ${{ env.ARTIFACT_DIR }}
-
-  create-release:
-    needs: [desktop-build, android-build]
-    runs-on: ubuntu-latest
-    concurrency:
-      group: create-release
-      cancel-in-progress: false
-    if: |
-      github.ref == 'refs/heads/master' &&
-      github.repository == 'Vita3K/Vita3K'
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Download artifacts
-        uses: actions/download-artifact@v8
-
-      - name: Get commit info
-        run: |
-          echo "GIT_SHORT_SHA=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
-          echo "BUILD_VARIABLE=$(git rev-list --count HEAD)" >> "$GITHUB_ENV"
-          echo "LAST_COMMIT_MESSAGE=$(git log -1 --pretty=format:'%s')" >> "$GITHUB_ENV"
-
-      - name: Get last committer
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          COMMITTER=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
-          https://api.github.com/repos/${{ github.repository }}/commits/${{ github.sha }} \
-          | jq -r '.commit.author.name')
-          echo "COMMITTER_NAME=$COMMITTER" >> "$GITHUB_ENV"
-
-      - name: Prepare release artifacts
-        run: bash ./.ci/release-collect.sh
-
-      - name: Upload to store repository
-        uses: tcnksm/ghr@v0
-        with:
-          tag: ${{ env.BUILD_VARIABLE }}
-          path: artifacts-store/
-          owner: ${{ github.repository_owner }}
-          repository: Vita3K-builds
-          name: "Build: ${{ env.BUILD_VARIABLE }}"
-          body: "Corresponding commit: [${{ env.LAST_COMMIT_MESSAGE }}](https://github.com/${{ github.repository }}/commit/${{ github.sha }}) (${{ env.COMMITTER_NAME }})"
-          token: ${{ secrets.STORE_TOKEN }}
-
-      - name: Upload to master repository
-        uses: tcnksm/ghr@v0
-        with:
-          tag: continuous
-          path: artifacts-master/
-          delete: "true"
-          owner: ${{ github.repository_owner }}
-          repository: Vita3K
-          name: "Automatic CI builds"
-          body: "Corresponding commit: ${{ github.sha }}\nVita3K Build: ${{ env.BUILD_VARIABLE }}"
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30
