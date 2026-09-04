@@ -65,6 +65,8 @@ std::string disassemble(CPUState &state, uint64_t at, bool thumb, uint16_t *insn
 std::string disassemble(CPUState &state, uint64_t at, uint16_t *insn_size = nullptr);
 bool hit_breakpoint(CPUState &state);
 void trigger_breakpoint(CPUState &state);
+void set_breakpoints_halt(bool halt);
+bool breakpoints_halt();
 void set_log_code(CPUState &state, bool log);
 
 // Thread-local CPU state for signal handler access (exception handlers)

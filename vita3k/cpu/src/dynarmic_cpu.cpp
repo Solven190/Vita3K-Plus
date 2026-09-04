@@ -529,12 +529,19 @@ public:
     void ExceptionRaised(uint32_t pc, Dynarmic::A32::Exception exception) override {
         switch (exception) {
         case Dynarmic::A32::Exception::Breakpoint: {
-            cpu->break_ = true;
-            cpu->jit->HaltExecution();
-            if (cpu->is_thumb_mode())
-                cpu->set_pc(pc | 1);
+            if (breakpoints_halt()) {
+                cpu->break_ = true;
+                cpu->jit->HaltExecution();
+                if (cpu->is_thumb_mode())
+                    cpu->set_pc(pc | 1);
+                else
+                    cpu->set_pc(pc);
+                break;
+            }
+            if (parent->on_guest_breakpoint)
+                parent->on_guest_breakpoint(pc);
             else
-                cpu->set_pc(pc);
+                LOG_ERROR("[BKPT] guest breakpoint at 0x{:X} on thread {} with no debugger attached, continuing", pc, parent->thread_id);
             break;
         }
         case Dynarmic::A32::Exception::WaitForInterrupt: {

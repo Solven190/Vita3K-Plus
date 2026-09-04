@@ -170,7 +170,7 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(bool, "accurate-thread-scheduling", false, accurate_thread_scheduling)                         \
     code(bool, "preempt-on-wake", false, preempt_on_wake)                                               \
     code(int, "preempt-on-wake-us", 1000, preempt_on_wake_us)                                             \
-    code(int, "guest-cores", 1, guest_cores)                                                            \
+    code(int, "guest-cores", 3, guest_cores)  /* the Vita gives an application three of its four cores */ \
     code(bool, "show-compile-shaders", true, show_compile_shaders)                                      \
     code(bool, "hashless-texture-cache", false, hashless_texture_cache)                                 \
     code(bool, "import-textures", false, import_textures)                                               \
@@ -191,7 +191,7 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(int, "delay-background", 4, delay_background)                                                  \
     code(int, "delay-start", 30, delay_start)                                                           \
     code(float, "background-alpha", .300f, background_alpha)                                            \
-    code(int, "log-level", 0 /*SPDLOG_LEVEL_TRACE*/, log_level)                                         \
+    code(int, "log-level", 2 /*SPDLOG_LEVEL_INFO*/, log_level)                                          \
     code(bool, "cpu-opt", true, cpu_opt)                                                                \
     code(std::string, "pref-path", std::string{}, vita_fs_path)                                         \
     code(bool, "discord-rich-presence", true, discord_rich_presence)                                    \

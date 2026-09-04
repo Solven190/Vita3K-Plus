@@ -23,6 +23,7 @@
 #include <util/types.h>
 
 #include <atomic>
+#include <functional>
 
 struct CPUState {
     CPUState() = default;
@@ -41,4 +42,6 @@ struct CPUState {
     std::atomic<bool> abort_pending{ false };
     std::atomic<uint32_t> abort_fault_addr{ 0 };
     std::atomic<bool> abort_is_write{ false };
+
+    std::function<void(uint32_t)> on_guest_breakpoint;
 };

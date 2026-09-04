@@ -362,6 +362,14 @@ void KernelState::log_thread_hang_dump() {
                 + fmt::format(" waiting_on={}#{} extra=0x{:X}", t->wait_prim_kind ? t->wait_prim_kind : "?", t->wait_prim_uid, t->wait_extra);
             if (const std::string target = describe_wait_target(*this, t->get_mem(), t); !target.empty())
                 line += "\n" + target;
+            if (status == ThreadStatus::suspend) {
+                // A suspended thread with no debugger is a freeze so name the flag that parked it and the instruction it sits on
+                uint16_t insn_size = 2;
+                const uint32_t spc = read_pc(*t->cpu) & ~1u;
+                uint32_t probe = 0;
+                line += fmt::format("\n    suspended: {} | at pc 0x{:08X}: {}", t->describe_suspend_state(), spc,
+                    debug_safe_copy_guest(t->get_mem(), spc, &probe, sizeof(probe)) ? disassemble(*t->cpu, spc, &insn_size) : std::string("<unreadable>"));
+            }
             {
                 const MemState &tmem = t->get_mem();
                 uint32_t rv[13];

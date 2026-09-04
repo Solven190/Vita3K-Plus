@@ -19,6 +19,7 @@
 #include <cpu/functions.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cpu/impl/dynarmic_cpu.h>
 #include <cpu/impl/interface.h>
 #include <cpu/state.h>
@@ -142,6 +143,16 @@ bool hit_breakpoint(CPUState &state) {
 
 void trigger_breakpoint(CPUState &state) {
     state.cpu->trigger_breakpoint();
+}
+
+static std::atomic<bool> g_breakpoints_halt{ false };
+
+void set_breakpoints_halt(bool halt) {
+    g_breakpoints_halt.store(halt, std::memory_order_relaxed);
+}
+
+bool breakpoints_halt() {
+    return g_breakpoints_halt.load(std::memory_order_relaxed);
 }
 
 void set_log_code(CPUState &state, bool log) {
