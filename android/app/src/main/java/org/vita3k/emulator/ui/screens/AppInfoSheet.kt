@@ -9,6 +9,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -22,11 +24,15 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
+import coil.compose.AsyncImage
 import org.vita3k.emulator.R
 import org.vita3k.emulator.data.AppInfo
 import org.vita3k.emulator.ui.theme.SCRIM_ALPHA
@@ -41,6 +47,7 @@ fun AppInfoSheet(
     installSizeBytes: Long,
     onDismiss: () -> Unit
 ) {
+    val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -65,7 +72,20 @@ fun AppInfoSheet(
             horizontalArrangement = Arrangement.spacedBy(16.dp),
             verticalAlignment = Alignment.Top
         ) {
-            AppIcon(app = app, size = 80)
+            val imageModel = getImageModel(app, context)
+            if (imageModel != null) {
+                AsyncImage(
+                    model = imageModel,
+                    contentDescription = app.title,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .size(width = 64.dp, height = 85.dp) 
+                        .clip(RoundedCornerShape(8.dp))
+                )
+            } else {
+                AppIcon(app = app, size = 80)
+            }
+            
             Column {
                 Text(app.title, style = MaterialTheme.typography.titleMedium)
                 Text(

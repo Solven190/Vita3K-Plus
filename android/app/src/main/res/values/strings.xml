@@ -763,4 +763,13 @@
     <string name="settings_emulator_browse_files_unavailable">No document browser found on this device. Vita3K+ still appears as a storage location in the sidebar of the system file picker, and in file managers that support document providers.</string>
     <string name="documents_root_summary">Games, saves, config and logs</string>
     <string name="documents_storage_root_summary">Games and saves (custom storage folder)</string>
+
+    <!-- Custom UI Additions -->
+    <string name="custom_cover_change">Change Cover</string>
+    <string name="custom_cover_remove">Remove Custom Cover</string>
+    <string name="compat_show">Show Compatibility</string>
+    <string name="compat_hide">Hide Compatibility</string>
+    <string name="menu_hide_titles">Hide Game Titles</string>
+    <string name="menu_show_compat_info">Show Compatibility Info</string>
+    <string name="filter_display_options">Display Options</string>
 </resources>

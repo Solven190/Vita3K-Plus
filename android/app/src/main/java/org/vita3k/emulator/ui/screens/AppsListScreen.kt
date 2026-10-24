@@ -4,8 +4,12 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.view.Gravity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.basicMarquee
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.*
@@ -28,6 +32,7 @@ import androidx.compose.material.icons.filled.EmojiEvents
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Person
@@ -57,6 +62,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import org.vita3k.emulator.R
 import org.vita3k.emulator.data.FirmwareInstallState
 import org.vita3k.emulator.data.AppInfo
@@ -72,6 +78,23 @@ import org.vita3k.emulator.ui.viewmodel.AppAction
 import org.vita3k.emulator.ui.viewmodel.AppActionGroup
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
+
+@Composable
+fun getImageModel(app: AppInfo, context: Context): Any? {
+    val customCover = File(context.filesDir, "covers/${app.titleId}.jpg")
+    return if (customCover.exists()) {
+        ImageRequest.Builder(context)
+            .data(customCover)
+            .memoryCacheKey("${app.titleId}_${customCover.lastModified()}")
+            .build()
+    } else {
+        app.iconFile
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -90,6 +113,10 @@ fun AppsListScreen(
     actionResultMessage: String?,
     selectionMode: Boolean,
     selectedAppIds: Set<String>,
+    hideGameTitles: Boolean,
+    globalHideCompat: Boolean,
+    hiddenCompatApps: Set<String>,
+    coverRefreshKey: Int,
     resolveAvailableActions: (AppInfo) -> Set<AppAction>,
     onAppSelected: (AppInfo) -> Unit,
     onRunAppAction: (AppInfo, AppAction) -> Unit,
@@ -107,12 +134,19 @@ fun AppsListScreen(
     onDismissUpdateCheckResult: () -> Unit,
     onRefresh: () -> Unit,
     onInstallClick: () -> Unit,
+    onToggleHideGameTitles: () -> Unit,
+    onToggleGlobalHideCompat: () -> Unit,
+    onToggleAppCompat: (String) -> Unit,
+    onCoverChanged: () -> Unit,
     onOpenSettings: () -> Unit = {},
     onOpenTrophyManager: () -> Unit = {},
     onOpenUserManagement: () -> Unit = {},
     onOpenWelcomeScreen: () -> Unit = {},
     onOpenCustomConfig: (AppInfo) -> Unit = {}
 ) {
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    
     var showSearchBar by remember { mutableStateOf(false) }
     var showFilterSheet by remember { mutableStateOf(false) }
     var showOverflowMenu by remember { mutableStateOf(false) }
@@ -121,6 +155,35 @@ fun AppsListScreen(
     var actionTargetApp by remember { mutableStateOf<AppInfo?>(null) }
     var pendingAction by remember { mutableStateOf<AppAction?>(null) }
     var showBatchDeleteConfirm by remember { mutableStateOf(false) }
+    
+    var appToChangeCover by remember { mutableStateOf<AppInfo?>(null) }
+
+    val coverPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null && appToChangeCover != null) {
+            val targetApp = appToChangeCover!!
+            coroutineScope.launch {
+                withContext(Dispatchers.IO) {
+                    val targetFile = File(context.filesDir, "covers/${targetApp.titleId}.jpg")
+                    targetFile.parentFile?.mkdirs()
+                    try {
+                        context.contentResolver.openInputStream(uri)?.use { input ->
+                            targetFile.outputStream().use { output ->
+                                input.copyTo(output)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
+                withContext(Dispatchers.Main) {
+                    onCoverChanged()
+                    appToChangeCover = null
+                }
+            }
+        }
+    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -267,31 +330,39 @@ fun AppsListScreen(
                 }
             }
             else -> {
-                when (viewMode) {
-                    ViewMode.LIST -> AppsListView(
-                        apps = apps,
-                        onAppSelected = onAppSelected,
-                        selectedAppIds = selectedAppIds,
-                        selectionMode = selectionMode,
-                        onSelectionClick = { onToggleAppSelection(it) },
-                        onActionLongPress = {
-                            selectedAppForActions = it
-                            onPrepareAppActions(it)
-                        },
-                        modifier = Modifier.padding(padding)
-                    )
-                    ViewMode.GRID -> AppsGridView(
-                        apps = apps,
-                        onAppSelected = onAppSelected,
-                        selectedAppIds = selectedAppIds,
-                        selectionMode = selectionMode,
-                        onSelectionClick = { onToggleAppSelection(it) },
-                        onActionLongPress = {
-                            selectedAppForActions = it
-                            onPrepareAppActions(it)
-                        },
-                        modifier = Modifier.padding(padding)
-                    )
+                key(coverRefreshKey) {
+                    when (viewMode) {
+                        ViewMode.LIST -> AppsListView(
+                            apps = apps,
+                            onAppSelected = onAppSelected,
+                            selectedAppIds = selectedAppIds,
+                            selectionMode = selectionMode,
+                            hiddenCompatApps = hiddenCompatApps,
+                            globalHideCompat = globalHideCompat,
+                            hideGameTitles = hideGameTitles,
+                            onSelectionClick = { onToggleAppSelection(it) },
+                            onActionLongPress = {
+                                selectedAppForActions = it
+                                onPrepareAppActions(it)
+                            },
+                            modifier = Modifier.padding(padding)
+                        )
+                        ViewMode.GRID -> AppsGridView(
+                            apps = apps,
+                            onAppSelected = onAppSelected,
+                            selectedAppIds = selectedAppIds,
+                            selectionMode = selectionMode,
+                            hiddenCompatApps = hiddenCompatApps,
+                            globalHideCompat = globalHideCompat,
+                            hideGameTitles = hideGameTitles,
+                            onSelectionClick = { onToggleAppSelection(it) },
+                            onActionLongPress = {
+                                selectedAppForActions = it
+                                onPrepareAppActions(it)
+                            },
+                            modifier = Modifier.padding(padding)
+                        )
+                    }
                 }
             }
         }
@@ -301,8 +372,12 @@ fun AppsListScreen(
         FilterSheet(
             sortOption = sortOption,
             viewMode = viewMode,
+            hideGameTitles = hideGameTitles,
+            globalHideCompat = globalHideCompat,
             onSortChanged = onSortChanged,
             onViewModeToggle = onViewModeToggle,
+            onToggleHideGameTitles = onToggleHideGameTitles,
+            onToggleGlobalHideCompat = onToggleGlobalHideCompat,
             onDismiss = { showFilterSheet = false }
         )
     }
@@ -318,6 +393,27 @@ fun AppsListScreen(
         AppActionsDialog(
             app = app,
             availableActions = resolveAvailableActions(app),
+            isCompatHidden = hiddenCompatApps.contains(app.titleId),
+            onToggleCompatBadges = {
+                onToggleAppCompat(app.titleId)
+            },
+            onChangeCover = {
+                appToChangeCover = app 
+                coverPickerLauncher.launch("image/*")
+            },
+            onRemoveCover = {
+                coroutineScope.launch {
+                    withContext(Dispatchers.IO) {
+                        val targetFile = File(context.filesDir, "covers/${app.titleId}.jpg")
+                        if (targetFile.exists()) {
+                            targetFile.delete()
+                        }
+                    }
+                    withContext(Dispatchers.Main) {
+                        onCoverChanged()
+                    }
+                }
+            },
             onDismiss = { selectedAppForActions = null },
             onActionSelected = { action ->
                 actionTargetApp = app
@@ -468,6 +564,109 @@ fun AppsListScreen(
             },
             confirmButton = {}
         )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun FilterSheet(
+    sortOption: SortOption,
+    viewMode: ViewMode,
+    hideGameTitles: Boolean,
+    globalHideCompat: Boolean,
+    onSortChanged: (SortOption) -> Unit,
+    onViewModeToggle: () -> Unit,
+    onToggleHideGameTitles: () -> Unit,
+    onToggleGlobalHideCompat: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        scrimColor = Color.Black.copy(alpha = SCRIM_ALPHA)
+    ) {
+        Column(modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 24.dp, vertical = 16.dp)) {
+            
+            Text(stringResource(R.string.filter_title), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+
+            Spacer(modifier = Modifier.height(24.dp))
+            Text(stringResource(R.string.filter_section_sort), style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+
+            Spacer(modifier = Modifier.height(8.dp))
+            SortOption.entries.forEach { option ->
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onSortChanged(option) }
+                        .padding(vertical = 4.dp)
+                ) {
+                    RadioButton(
+                        selected = sortOption == option,
+                        onClick = { onSortChanged(option) }
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = when(option) {
+                            SortOption.TITLE -> stringResource(R.string.apps_list_sort_title)
+                            SortOption.LAST_PLAYED -> stringResource(R.string.apps_list_sort_last_played)
+                            SortOption.COMPATIBILITY -> stringResource(R.string.apps_list_sort_compatibility)
+                        },
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+            Text(stringResource(R.string.filter_section_view), style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                FilterChip(
+                    selected = viewMode == ViewMode.LIST,
+                    onClick = { if (viewMode != ViewMode.LIST) onViewModeToggle() },
+                    label = { Text(stringResource(R.string.filter_view_list)) },
+                    leadingIcon = { if (viewMode == ViewMode.LIST) Icon(Icons.AutoMirrored.Filled.List, contentDescription = null) }
+                )
+                FilterChip(
+                    selected = viewMode == ViewMode.GRID,
+                    onClick = { if (viewMode != ViewMode.GRID) onViewModeToggle() },
+                    label = { Text(stringResource(R.string.filter_view_grid)) },
+                    leadingIcon = { if (viewMode == ViewMode.GRID) Icon(Icons.Default.GridView, contentDescription = null) }
+                )
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+            Text(stringResource(R.string.filter_display_options), style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onToggleHideGameTitles() }
+                    .padding(vertical = 8.dp)
+            ) {
+                Switch(checked = hideGameTitles, onCheckedChange = { onToggleHideGameTitles() })
+                Spacer(modifier = Modifier.width(16.dp))
+                Text(stringResource(R.string.menu_hide_titles), style = MaterialTheme.typography.bodyLarge)
+            }
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onToggleGlobalHideCompat() }
+                    .padding(vertical = 8.dp)
+            ) {
+                Switch(checked = !globalHideCompat, onCheckedChange = { onToggleGlobalHideCompat() })
+                Spacer(modifier = Modifier.width(16.dp))
+                Text(stringResource(R.string.menu_show_compat_info), style = MaterialTheme.typography.bodyLarge)
+            }
+
+            Spacer(modifier = Modifier.height(32.dp))
+        }
     }
 }
 
@@ -896,53 +1095,94 @@ private fun AppsListView(
     onAppSelected: (AppInfo) -> Unit,
     selectedAppIds: Set<String>,
     selectionMode: Boolean,
+    hiddenCompatApps: Set<String>,
+    globalHideCompat: Boolean,
+    hideGameTitles: Boolean,
     onSelectionClick: (AppInfo) -> Unit,
     onActionLongPress: (AppInfo) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    LazyColumn(modifier = modifier.fillMaxSize()) {
+    val context = LocalContext.current
+    LazyColumn(
+        modifier = modifier.fillMaxSize(),
+        contentPadding = PaddingValues(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
         items(apps, key = { it.titleId }) { app ->
             val haptic = LocalHapticFeedback.current
-            ListItem(
-                headlineContent = {
-                    Text(app.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                },
-                supportingContent = {
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(app.titleId)
-                        AppStatusBadges(app)
-                    }
-                },
-                leadingContent = {
-                    AppIcon(app, size = 48)
-                },
-                trailingContent = {
-                    if (selectionMode && selectedAppIds.contains(app.titleId)) {
-                        Icon(
-                            imageVector = Icons.Default.Check,
-                            contentDescription = stringResource(R.string.apps_list_cd_selected),
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                    }
-                },
-                colors = ListItemDefaults.colors(
-                    containerColor = MaterialTheme.colorScheme.background,
-                    headlineColor = MaterialTheme.colorScheme.onSurface,
-                    supportingColor = MaterialTheme.colorScheme.onSurfaceVariant
-                ),
-                modifier = Modifier.combinedClickable(
-                    onClick = {
-                        if (selectionMode) onSelectionClick(app) else onAppSelected(app)
+            val isCompatHidden = globalHideCompat || hiddenCompatApps.contains(app.titleId)
+            
+            Card(
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                ListItem(
+                    headlineContent = {
+                        if (!hideGameTitles) {
+                            Text(
+                                app.title,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.basicMarquee() 
+                            )
+                        } else {
+                            Spacer(modifier = Modifier.height(20.dp)) 
+                        }
                     },
-                    onLongClick = {
-                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                        if (selectionMode) onSelectionClick(app) else onActionLongPress(app)
-                    }
+                    supportingContent = {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            if (!hideGameTitles) {
+                                Text(app.titleId)
+                            }
+                            if (!isCompatHidden) {
+                                AppStatusBadges(app)
+                            }
+                        }
+                    },
+                    leadingContent = {
+                        val imageModel = getImageModel(app, context)
+                        if (imageModel != null) {
+                            AsyncImage(
+                                model = imageModel,
+                                contentDescription = app.title,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .size(width = 45.dp, height = 60.dp) 
+                                    .clip(RoundedCornerShape(4.dp))
+                            )
+                        } else {
+                            AppIcon(app, size = 48)
+                        }
+                    },
+                    trailingContent = {
+                        if (selectionMode && selectedAppIds.contains(app.titleId)) {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = stringResource(R.string.apps_list_cd_selected),
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    },
+                    colors = ListItemDefaults.colors(
+                        containerColor = Color.Transparent,
+                        headlineColor = MaterialTheme.colorScheme.onSurface,
+                        supportingColor = MaterialTheme.colorScheme.onSurfaceVariant
+                    ),
+                    modifier = Modifier.combinedClickable(
+                        onClick = {
+                            if (selectionMode) onSelectionClick(app) else onAppSelected(app)
+                        },
+                        onLongClick = {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            if (selectionMode) onSelectionClick(app) else onActionLongPress(app)
+                        }
+                    )
                 )
-            )
+            }
         }
     }
 }
@@ -953,12 +1193,15 @@ private fun AppsGridView(
     onAppSelected: (AppInfo) -> Unit,
     selectedAppIds: Set<String>,
     selectionMode: Boolean,
+    hiddenCompatApps: Set<String>,
+    globalHideCompat: Boolean,
+    hideGameTitles: Boolean,
     onSelectionClick: (AppInfo) -> Unit,
     onActionLongPress: (AppInfo) -> Unit,
     modifier: Modifier = Modifier
 ) {
     LazyVerticalGrid(
-        columns = GridCells.Adaptive(minSize = 120.dp),
+        columns = GridCells.Adaptive(minSize = 100.dp), 
         contentPadding = PaddingValues(8.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -969,6 +1212,8 @@ private fun AppsGridView(
                 app = app,
                 selected = selectedAppIds.contains(app.titleId),
                 selectionMode = selectionMode,
+                isCompatHidden = globalHideCompat || hiddenCompatApps.contains(app.titleId),
+                hideGameTitles = hideGameTitles,
                 onClick = {
                     if (selectionMode) onSelectionClick(app) else onAppSelected(app)
                 },
@@ -986,9 +1231,12 @@ private fun AppGridItem(
     app: AppInfo,
     selected: Boolean,
     selectionMode: Boolean,
+    isCompatHidden: Boolean,
+    hideGameTitles: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit
 ) {
+    val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
     Card(
         modifier = Modifier
@@ -1003,27 +1251,59 @@ private fun AppGridItem(
         shape = RoundedCornerShape(8.dp)
     ) {
         Column {
-            AppIcon(app, size = 120, modifier = Modifier.fillMaxWidth())
-            Column(modifier = Modifier.padding(8.dp)) {
-                Text(
-                    app.title,
-                    style = MaterialTheme.typography.bodySmall,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(top = 4.dp)
-                ) {
-                    AppStatusBadges(app)
-                    if (selectionMode && selected) {
-                        Icon(
-                            imageVector = Icons.Default.Check,
-                            contentDescription = stringResource(R.string.apps_list_cd_selected),
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(16.dp)
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(0.75f) 
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                contentAlignment = Alignment.Center
+            ) {
+                val imageModel = getImageModel(app, context)
+                if (imageModel != null) {
+                    AsyncImage(
+                        model = imageModel,
+                        contentDescription = app.title,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Text(
+                        app.title.take(2).uppercase(),
+                        style = MaterialTheme.typography.titleLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            if (!hideGameTitles || !isCompatHidden || (selectionMode && selected)) {
+                Column(modifier = Modifier.padding(8.dp)) {
+                    if (!hideGameTitles) {
+                        Text(
+                            app.title,
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.basicMarquee()
                         )
+                    }
+                    if (!isCompatHidden || (selectionMode && selected)) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(top = if (!hideGameTitles) 4.dp else 0.dp)
+                        ) {
+                            if (!isCompatHidden) {
+                                AppStatusBadges(app)
+                            }
+                            if (selectionMode && selected) {
+                                Icon(
+                                    imageVector = Icons.Default.Check,
+                                    contentDescription = stringResource(R.string.apps_list_cd_selected),
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -1145,12 +1425,18 @@ private fun formatPublishedAt(publishedAt: String): String {
 private fun AppActionsDialog(
     app: AppInfo,
     availableActions: Set<AppAction>,
+    isCompatHidden: Boolean,
+    onToggleCompatBadges: () -> Unit,
+    onChangeCover: () -> Unit,
+    onRemoveCover: () -> Unit, 
     onDismiss: () -> Unit,
     onActionSelected: (AppAction) -> Unit,
     onShowInfo: () -> Unit,
     onCustomConfig: () -> Unit = {}
 ) {
     var showDeleteSubmenu by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val customCoverFile = File(context.filesDir, "covers/${app.titleId}.jpg")
 
     if (showDeleteSubmenu) {
         val availableDeletes = AppAction.entries
@@ -1192,7 +1478,6 @@ private fun AppActionsDialog(
     val otherActions = AppAction.entries.filter { it.group == AppActionGroup.OTHER }
 
     AppMenuDialog(title = app.title, onDismiss = onDismiss) {
-        // Information
         AppMenuRow(
             label = stringResource(R.string.app_menu_information),
             icon = {
@@ -1205,7 +1490,6 @@ private fun AppActionsDialog(
             },
             onClick = { onDismiss(); onShowInfo() }
         )
-        // Custom Config
         AppMenuRow(
             label = stringResource(R.string.app_menu_custom_config),
             icon = {
@@ -1218,8 +1502,54 @@ private fun AppActionsDialog(
             },
             onClick = { onCustomConfig() }
         )
-
-        // Other actions (reset last played, etc.)
+        AppMenuRow(
+            label = stringResource(R.string.custom_cover_change),
+            icon = {
+                Icon(
+                    Icons.Default.Image,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp)
+                )
+            },
+            onClick = { 
+                onDismiss()
+                onChangeCover() 
+            }
+        )
+        if (customCoverFile.exists()) {
+            AppMenuRow(
+                label = stringResource(R.string.custom_cover_remove),
+                labelColor = MaterialTheme.colorScheme.error,
+                icon = {
+                    Icon(
+                        Icons.Default.Delete,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(18.dp)
+                    )
+                },
+                onClick = { 
+                    onDismiss()
+                    onRemoveCover() 
+                }
+            )
+        }
+        AppMenuRow(
+            label = stringResource(if (isCompatHidden) R.string.compat_show else R.string.compat_hide),
+            icon = {
+                Icon(
+                    Icons.Default.FilterList,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp)
+                )
+            },
+            onClick = { 
+                onToggleCompatBadges()
+                onDismiss()
+            }
+        )
         otherActions.forEach { action ->
             val enabled = availableActions.contains(action)
             val actionIcon: (@Composable () -> Unit)? = when (action) {
@@ -1242,10 +1572,6 @@ private fun AppActionsDialog(
                 onClick = { if (enabled) { onActionSelected(action) } }
             )
         }
-
-        
-        
-        // Delete — drills into submenu
         if (hasAnyDelete) {
             AppMenuRow(
                 label = stringResource(R.string.app_menu_delete),

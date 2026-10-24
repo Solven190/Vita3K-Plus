@@ -5,6 +5,7 @@ import androidx.annotation.PluralsRes
 import androidx.annotation.StringRes
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -35,6 +36,7 @@ class AppsListViewModel(application: Application) : AndroidViewModel(application
     private val _allApps = mutableListOf<AppInfo>()
     val apps = mutableStateListOf<AppInfo>()
     private val _selectedAppIds = mutableStateListOf<String>()
+    
     // Stable snapshot of selected IDs avoids .toSet() allocation on every recomposition.
     val selectedAppIds: Set<String> by derivedStateOf { _selectedAppIds.toHashSet() }
 
@@ -69,11 +71,44 @@ class AppsListViewModel(application: Application) : AndroidViewModel(application
     var updateCheckResult by mutableStateOf<UpdateCheckResult?>(null)
         private set
 
-    // --- App info dialog ---
     var infoDialogApp by mutableStateOf<AppInfo?>(null)
         private set
     var infoAppInstallSizeBytes by mutableStateOf(-1L)
         private set
+
+    var hideGameTitles by mutableStateOf(AppStorage.hideGameTitles(application))
+        private set
+    var globalHideCompat by mutableStateOf(AppStorage.globalHideCompat(application))
+        private set
+    var hiddenCompatApps by mutableStateOf(AppStorage.getHiddenCompatApps(application))
+        private set
+    var coverRefreshKey by mutableIntStateOf(0)
+        private set
+
+    fun toggleHideGameTitles() {
+        hideGameTitles = !hideGameTitles
+        AppStorage.setHideGameTitles(getApplication(), hideGameTitles)
+    }
+
+    fun toggleGlobalHideCompat() {
+        globalHideCompat = !globalHideCompat
+        AppStorage.setGlobalHideCompat(getApplication(), globalHideCompat)
+    }
+
+    fun toggleAppCompat(titleId: String) {
+        val newSet = hiddenCompatApps.toMutableSet()
+        if (newSet.contains(titleId)) {
+            newSet.remove(titleId)
+        } else {
+            newSet.add(titleId)
+        }
+        hiddenCompatApps = newSet
+        AppStorage.setHiddenCompatApps(getApplication(), newSet)
+    }
+
+    fun notifyCoverChanged() {
+        coverRefreshKey++
+    }
 
     fun initialize(storagePath: String) {
         if (initialized || loading) return

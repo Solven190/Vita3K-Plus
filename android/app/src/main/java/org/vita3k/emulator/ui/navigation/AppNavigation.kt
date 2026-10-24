@@ -272,6 +272,10 @@ fun AppNavigation(
                 actionResultMessage = appsListViewModel.actionResultMessage,
                 selectionMode = appsListViewModel.selectionMode,
                 selectedAppIds = appsListViewModel.selectedAppIds,
+                hideGameTitles = appsListViewModel.hideGameTitles,
+                globalHideCompat = appsListViewModel.globalHideCompat,
+                hiddenCompatApps = appsListViewModel.hiddenCompatApps,
+                coverRefreshKey = appsListViewModel.coverRefreshKey,
                 resolveAvailableActions = { app -> appsListViewModel.getAvailableActions(app.titleId) },
                 onAppSelected = { app -> onAppLaunch(app) },
                 onRunAppAction = { app, action -> appsListViewModel.runAppAction(app, action) },
@@ -289,6 +293,10 @@ fun AppNavigation(
                 onDismissUpdateCheckResult = { appsListViewModel.dismissUpdateCheckResult() },
                 onRefresh = { appsListViewModel.refreshAppsList(syncCompatibility = true) },
                 onInstallClick = { installViewModel.showSheet() },
+                onToggleHideGameTitles = { appsListViewModel.toggleHideGameTitles() },
+                onToggleGlobalHideCompat = { appsListViewModel.toggleGlobalHideCompat() },
+                onToggleAppCompat = { titleId -> appsListViewModel.toggleAppCompat(titleId) },
+                onCoverChanged = { appsListViewModel.notifyCoverChanged() },
                 onOpenSettings = {
                     navController.navigate(ROUTE_SETTINGS) {
                         launchSingleTop = true
